@@ -50,7 +50,32 @@ pub struct Transaction {
     /// Issuer's signature over the signing payload.
     pub issuer_sig: SignatureEnvelope,
     /// Additional co-signer signatures (accreditation bodies, labs, etc.).
+    ///
+    /// Every entry must correspond to a key the issuer listed in
+    /// [`Self::declared_cosigners`] — see that field for why.
     pub additional_sigs: Vec<SignatureEnvelope>,
+    /// Keys the issuer permits to co-sign this transaction (CS1).
+    ///
+    /// Covered by the signing payload, so the issuer commits to *who may ever
+    /// appear* on the record. An empty list — the default — means no
+    /// co-signatures are accepted at all.
+    ///
+    /// # Why this exists
+    ///
+    /// T7 verifies each additional signature against its own embedded key and
+    /// nothing else, so **anyone** could append a valid signature to a
+    /// transaction in flight and land themselves on a permanent public record
+    /// they had no part in. For a chain whose purpose is proving *who vouched
+    /// for a document* — a test lab, an accreditation body, a manufacturer —
+    /// a signer list that strangers can add themselves to is not evidence of
+    /// anything. Declaring the permitted keys up front makes the list mean what
+    /// it appears to mean: a transaction may only carry what its payer intended.
+    ///
+    /// Co-signers may still sign *later* and in any order; only *which* keys
+    /// may appear is fixed at signing time. Adding a co-signer after the fact
+    /// requires a new transaction, by design.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_cosigners: Vec<noble_crypto::NoblePublicKey>,
     /// Key-value metadata entries.
     pub metadata: Vec<MetadataEntry>,
     /// Optional encrypted locator for private document sharing (notarization only).
@@ -107,6 +132,36 @@ impl Transaction {
     ) -> Result<[u8; 32], noble_codec::CodecError> {
         let payload_bytes = crate::wire::v1::tx_signing_payload_bytes(self, chain_id);
         Ok(sha256(&payload_bytes).0)
+    }
+
+    /// Compute the **intent** identifier: `double_sha256(chain_id_be || signing_payload)`.
+    ///
+    /// Same shape as [`Self::compute_tx_id`] but over the *signing payload*
+    /// rather than the full wire bytes, so it deliberately does **not** commit
+    /// to signatures or to metadata insertion order. Two transactions that
+    /// express the same signed intent therefore share one `intent_id` even if
+    /// their signature sets differ — which is what makes malleability
+    /// detectable: an extra appended signature produces a different `tx_id` but
+    /// the *same* `intent_id`, so the mempool can recognise it as a duplicate
+    /// rather than admitting a second copy of the same payment.
+    ///
+    /// # Why this is separate from `tx_id`
+    ///
+    /// `tx_id` must keep committing to the complete wire bytes. It is what the
+    /// block header's Merkle root is built from, what `OutPoint`s reference,
+    /// and what the mempool's signature cache is keyed by — a cache hit is only
+    /// sound because the key covers the exact signature bytes that were
+    /// verified. Redefining `tx_id` to mean intent would have broken all three
+    /// at once: the block hash would stop committing to the transaction bodies
+    /// it contains, and the signature cache would skip verification for a
+    /// transaction whose signatures had been swapped. So intent gets its own
+    /// identifier and `tx_id` is left alone.
+    pub fn compute_intent_id(&self, chain_id: u32) -> Result<Hash256, noble_codec::CodecError> {
+        let payload = crate::wire::v1::tx_signing_payload_bytes(self, chain_id);
+        let mut preimage = Vec::with_capacity(4 + payload.len());
+        preimage.extend_from_slice(&chain_id.to_be_bytes());
+        preimage.extend_from_slice(&payload);
+        Ok(double_sha256(&preimage))
     }
 
     /// Whether this is a coinbase transaction (block reward).
@@ -177,6 +232,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![MetadataEntry {
                 key: "doc_type".into(),
                 value: b"test_report".to_vec(),
@@ -346,6 +402,7 @@ mod tests {
                 scheme_id: SCHEME_SECP256K1, public_key: pk.key_bytes().to_vec(), signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -378,6 +435,7 @@ mod tests {
                 scheme_id: SCHEME_SECP256K1, public_key: pk.key_bytes().to_vec(), signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],

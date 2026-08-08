@@ -18,6 +18,21 @@ use tower::Layer;
 use noble_storage::StorageEngine;
 
 use crate::error::ApiError;
+
+/// H12: maximum JSON-RPC calls permitted in one batch request.
+///
+/// jsonrpsee defaults to UNLIMITED, and the tower rate-limit layer charges the
+/// outer HTTP request — so one request carrying thousands of calls counted as
+/// one. The control plane is single-operator, so this is not a throughput
+/// limit; it exists so a single request cannot expand into unbounded work the
+/// limiter never sees. Applied to BOTH builders so TLS and plaintext match.
+pub const MAX_JSONRPC_BATCH_CALLS: u32 = 10;
+
+/// M12: maximum concurrent WebSocket subscriptions per connection.
+///
+/// The dashboard opens a handful; jsonrpsee's 1024 default is headroom nobody
+/// needs and memory one connection can pin.
+pub const MAX_WS_SUBSCRIPTIONS: u32 = 64;
 use crate::ip_filter::{IpFilter, IpFilterLayer};
 use crate::methods::address::AddressApiServer;
 use crate::methods::badge::BadgeApiServer;
@@ -186,7 +201,18 @@ async fn start_single_server<S: StorageEngine + Send + Sync + 'static>(
         let (stop_handle, server_handle) = jsonrpsee::server::stop_channel();
 
         let mut builder = Server::builder()
-            .max_request_body_size(2 * 1024 * 1024);
+            .max_request_body_size(2 * 1024 * 1024)
+            // H12: jsonrpsee defaults to UNLIMITED batch size, and the tower
+            // rate-limit layer charges the outer HTTP request — so one request
+            // carrying thousands of calls counted as one. Cap it on BOTH
+            // builders so TLS and plaintext behave identically.
+            .set_batch_request_config(jsonrpsee::server::BatchRequestConfig::Limit(
+                MAX_JSONRPC_BATCH_CALLS,
+            ))
+            // M12: jsonrpsee allows 1024 subscriptions per connection by
+            // default. The dashboard uses a handful; 1024 is headroom nobody
+            // needs and memory a single connection can pin.
+            .max_subscriptions_per_connection(MAX_WS_SUBSCRIPTIONS);
         builder = match mode {
             ServerMode::HttpOnly => builder.http_only(),
             ServerMode::WsOnly => builder.ws_only(),
@@ -275,6 +301,17 @@ async fn start_single_server<S: StorageEngine + Send + Sync + 'static>(
     // ── Plain HTTP path ──────────────────────────────────────────────────────
     let mut builder = Server::builder()
         .max_request_body_size(2 * 1024 * 1024)
+            // H12: jsonrpsee defaults to UNLIMITED batch size, and the tower
+            // rate-limit layer charges the outer HTTP request — so one request
+            // carrying thousands of calls counted as one. Cap it on BOTH
+            // builders so TLS and plaintext behave identically.
+            .set_batch_request_config(jsonrpsee::server::BatchRequestConfig::Limit(
+                MAX_JSONRPC_BATCH_CALLS,
+            ))
+            // M12: jsonrpsee allows 1024 subscriptions per connection by
+            // default. The dashboard uses a handful; 1024 is headroom nobody
+            // needs and memory a single connection can pin.
+            .max_subscriptions_per_connection(MAX_WS_SUBSCRIPTIONS)
         .max_connections(max_connections as u32);
     builder = match mode {
         ServerMode::HttpOnly => builder.http_only(),

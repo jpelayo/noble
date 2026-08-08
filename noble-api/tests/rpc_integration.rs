@@ -84,6 +84,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
     let (peer_update_tx, _) = tokio::sync::broadcast::channel(16);
 
     let state = Arc::new(ApiState {
+            dir_size_cache: parking_lot::Mutex::new(None),
         storage,
         mempool,
         validator_registry: Arc::new(TrackedRwLock::new(LockOrder::ValidatorRegistry, noble_consensus::ValidatorRegistry::new(
@@ -718,6 +719,7 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
             signature: vec![],
         },
         additional_sigs: vec![],
+        declared_cosigners: Vec::new(),
         metadata: vec![],
         encrypted_locator: None,
         external_attestations: vec![],
@@ -905,6 +907,7 @@ async fn rpc_readers_do_not_deadlock_under_writer_contention() {
         use noble_codec::NobleCbor;
         use noble_consensus::history::BlockVoter;
         let votes = noble_consensus::BlockVotes {
+            certificate: None,
             cycle_number: 1,
             voter_count: 1,
             strength: "Strong".to_string(),

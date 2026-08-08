@@ -202,6 +202,14 @@ pub enum ValidationError {
     #[error("T27b: non-document tx (type {0:#04x}) must have zero checksum")]
     NonDocumentWithChecksum(u8),
 
+    /// T9b: metadata entries are not in canonical order (key, then value).
+    ///
+    /// Duplicate keys are legal and protocol readers take the first match, so
+    /// order is semantic; requiring canonical order stops an in-transit
+    /// reordering from changing meaning while the signature still verifies.
+    #[error("T9b: metadata must be in canonical order (by key, then value)")]
+    MetadataNotCanonical,
+
     /// T29: `doc:prev_checksum` value is not a valid 64-char hex-encoded hash.
     #[error("T29: invalid doc:prev_checksum value: {0}")]
     InvalidPrevChecksum(String),
@@ -221,6 +229,53 @@ pub enum ValidationError {
     /// T32: source_address required for secp256k1 senders at/above activation height.
     #[error("T32: source_address required for secp256k1 senders")]
     SourceAddressRequired,
+
+    // --- Stateful input validation (C1/C2) ---
+    // These are produced ONLY by `stateful_validation::validate_resolved_inputs`,
+    // which the caller invokes after resolving every input against the UTXO set.
+    // They are typed (never string-parsed) so mempool/storage can map outcomes
+    // without inspecting message text.
+    /// The caller supplied a different number of resolved inputs than the tx has.
+    #[error("resolved input count {actual} != tx input count {expected}")]
+    ResolvedInputCountMismatch { expected: usize, actual: usize },
+
+    /// A resolved input is not the outpoint the transaction references at that index.
+    #[error("resolved input {index} does not match the tx outpoint at that index")]
+    ResolvedOutpointMismatch { index: usize },
+
+    /// The same outpoint is consumed more than once in one transaction.
+    #[error("duplicate input outpoint at index {index}")]
+    DuplicateResolvedOutpoint { index: usize },
+
+    /// C1: the consumed UTXO is not controlled by the transaction issuer.
+    /// Diagnostic carries the input index and outpoint only — never key material.
+    #[error("C1: input {index} ({outpoint}) is not owned by the issuer")]
+    InputOwnershipMismatch { index: usize, outpoint: String },
+
+    /// The issuer signature scheme cannot be mapped to an address (cannot prove ownership).
+    #[error("C1: unsupported issuer scheme {scheme:#04x} for ownership derivation")]
+    UnsupportedIssuerScheme { scheme: u8 },
+
+    /// The consumed UTXO has not reached `COINBASE_MATURITY` confirmations.
+    #[error("input {index} immature (created at {created_height}, spending at {spend_height})")]
+    InputImmature { index: usize, created_height: u64, spend_height: u64 },
+
+    /// Summing input values overflowed u64.
+    #[error("input value sum overflow")]
+    InputValueOverflow,
+
+    /// Summing output values overflowed u64.
+    #[error("output value sum overflow")]
+    OutputValueOverflow,
+
+    /// C2: value conservation violated — the transaction would mint coins.
+    #[error("C2: outputs ({outputs}) exceed inputs ({inputs})")]
+    OutputsExceedInputs { inputs: u64, outputs: u64 },
+
+    /// A coinbase/fee-distribution transaction was passed to the regular-input
+    /// validator. Those types mint by protocol rule and are checked separately.
+    #[error("tx type {0:#04x} must not be validated as a regular-input transaction")]
+    NotARegularInputTransaction(u8),
 
     // --- General ---
     /// Codec or crypto error during validation.

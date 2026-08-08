@@ -768,7 +768,14 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             fs::create_dir_all(parent)?;
         }
     }
+    // L18: `noble.toml` can carry `pkcs12_password`, and plain `fs::write`
+    // inherits the umask — commonly world-readable. Restrict it to the owner.
     fs::write(config_file, &toml_str)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(config_file, fs::Permissions::from_mode(0o600));
+    }
 
     // Also persist identity.json to data_dir so the node's canonical identity
     // source is up-to-date from the first boot (same file used by noble_setNodeIdentity).

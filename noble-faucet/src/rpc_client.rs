@@ -346,6 +346,17 @@ impl NodeRpcClient {
         // Gatekeeper header — required by the RPC server middleware.
         http_req.push_str("Gatekeeper: noble\r\n");
         if let Some(ref code) = self.totp_code {
+            // L16: a STATIC `--totp-code` is single-use by design — the node's
+            // replay tracker rejects the second request that presents it, so a
+            // long-running faucet authenticates once and then fails every
+            // subsequent authenticated call. This is survivable today only
+            // because the faucet's own RPCs (estimateFee, submitTransaction,
+            // reads) are public methods that never require TOTP; it breaks the
+            // moment one of them becomes privileged.
+            //
+            // The fix is a TOTP *seed* so a fresh code can be derived per
+            // request, not a code captured at startup. Kept as-is here rather
+            // than silently retrying, so the failure stays visible.
             use sha2::{Digest, Sha256};
             let hash = Sha256::digest(code.as_bytes());
             let hash_hex = hex::encode(hash);

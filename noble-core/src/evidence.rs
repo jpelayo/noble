@@ -160,6 +160,29 @@ impl DoubleProposalEvidence {
             return Err(EvidenceError::CrossForkProposal);
         }
 
+        // 3c. H2: each header's signing key must BE the accused validator.
+        //
+        // `verify_standalone` checks a signature against the key embedded in
+        // the envelope, so on its own it only proves "somebody signed this" —
+        // not that the accused did. Without this bind, an attacker could set
+        // `validator_id` to a victim, sign both headers with their OWN key, and
+        // produce evidence that verifies. Consumers attribute misbehaviour by
+        // `validator_id`, so the victim's reputation would be destroyed for
+        // blocks they never signed.
+        let claimed = self.validator_id.to_wire_bytes();
+        for (label, header) in [("header_a", &self.header_a), ("header_b", &self.header_b)] {
+            let signer = header
+                .validator_sig
+                .to_noble_public_key()
+                .map_err(|e| EvidenceError::InvalidSignature(format!("{label}: {e}")))?
+                .to_wire_bytes();
+            if signer != claimed {
+                return Err(EvidenceError::InvalidSignature(format!(
+                    "{label}: signed by a different key than the accused validator"
+                )));
+            }
+        }
+
         // 4. Valid signatures — compute signing message, then verify via SignatureEnvelope
         let msg_a = self
             .header_a
@@ -505,6 +528,34 @@ mod tests {
         let h2 = make_signed_header(&priv_key, &pub_key, 10, 1_700_000_001); // different timestamp → different hash
         let evidence = DoubleProposalEvidence::new(h1, h2);
         assert!(evidence.verify().is_ok());
+    }
+
+    #[test]
+    fn h2_evidence_cannot_frame_a_validator_who_never_signed() {
+        // Both headers claim the victim as validator_id but are signed by the
+        // attacker. Signature verification alone passes (verify_standalone
+        // checks each envelope against its OWN embedded key), so without the
+        // key bind this evidence verified — and consumers attribute
+        // misbehaviour by validator_id, destroying the victim's reputation for
+        // blocks they never signed.
+        let (attacker_priv, attacker_pub) = make_validator();
+        let (_victim_priv, victim_pub) = make_validator();
+
+        let mut h1 = make_signed_header(&attacker_priv, &attacker_pub, 10, 1_700_000_000);
+        let mut h2 = make_signed_header(&attacker_priv, &attacker_pub, 10, 1_700_000_001);
+        // Point the accusation at the victim, leaving the attacker's signatures.
+        h1.validator_id = victim_pub.clone();
+        h2.validator_id = victim_pub.clone();
+
+        let evidence = DoubleProposalEvidence {
+            header_a: h1,
+            header_b: h2,
+            validator_id: victim_pub,
+        };
+        assert!(
+            matches!(evidence.verify(), Err(EvidenceError::InvalidSignature(_))),
+            "evidence signed by a different key must not implicate the accused"
+        );
     }
 
     #[test]

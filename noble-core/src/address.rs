@@ -183,6 +183,32 @@ impl NobleAddress {
         Some(NobleAddress::BitcoinTaproot(output_key))
     }
 
+    /// Whether `issuer` controls the private key for `self`.
+    ///
+    /// This is the single canonical issuer→address matcher (C1). Every stateful
+    /// acceptance path — mempool admission, block commit, sync import — MUST use
+    /// this one function so no backend can drift from another: a mismatch between
+    /// two derivations would either freeze honest coins or admit a theft.
+    ///
+    /// Matching is by typed payload, never by string round-trip, and derivation
+    /// reuses [`Self::bitcoin_hash160_for_pubkey`] / [`Self::bitcoin_taproot_for_pubkey`]
+    /// rather than reimplementing the hashing rules.
+    ///
+    /// One secp256k1 key controls three address forms: its native Noble address,
+    /// the Bitcoin Hash160 form (P2PKH and P2WPKH share it), and the BIP-341
+    /// key-path Taproot output key.
+    pub fn is_controlled_by(&self, issuer: &NoblePublicKey) -> bool {
+        match self {
+            NobleAddress::Noble(pk) => pk == issuer,
+            NobleAddress::BitcoinHash160(_) => {
+                Self::bitcoin_hash160_for_pubkey(issuer).as_ref() == Some(self)
+            }
+            NobleAddress::BitcoinTaproot(_) => {
+                Self::bitcoin_taproot_for_pubkey(issuer).as_ref() == Some(self)
+            }
+        }
+    }
+
     /// Parse any canonical public-key / address string into a `NobleAddress`.
     ///
     /// Accepts (in priority order):

@@ -79,6 +79,85 @@ pub struct BlockVotes {
     pub dual_witness_required: bool,
     /// Whether the Dual-Witness threshold was met.
     pub dual_witness_met: bool,
+    /// The signed votes behind this block — the part that is actually
+    /// verifiable (A2). `None` only for records written before certificates
+    /// existed; every block from block 1 of a fresh chain carries one.
+    #[serde(default)]
+    pub certificate: Option<WitnessCertificate>,
+}
+
+/// A verifiable witness certificate: the actual **signed** votes that carried a
+/// block, stored alongside it.
+///
+/// [`BlockVotes`] records validator names and hex keys — enough for a dashboard,
+/// but it proves nothing. A node importing history cannot check that those
+/// validators really voted, because no signature is retained; sync consequently
+/// accepted vote data after a bare CBOR decode. This type keeps the signed
+/// `PorVote`s themselves, so any node can re-verify support for a block
+/// independently, long after the cycle that produced it.
+///
+/// **Scope limit, stated honestly:** verifying a certificate proves that these
+/// keys signed for this candidate in this cycle — signed *support*, and
+/// block-1 Dual-Witness compliance. Under Noble's open consensus it cannot
+/// prove that this was the *majority* of the network at the time, because
+/// historical membership is not recorded anywhere. Do not read more into a
+/// valid certificate than that.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WitnessCertificate {
+    /// Cycle the votes were cast in.
+    pub cycle: u64,
+    /// The candidate block these votes support.
+    pub candidate_hash: Hash256,
+    /// The signed votes themselves.
+    pub votes: Vec<crate::vote::PorVote>,
+}
+
+/// Why a witness certificate failed verification.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WitnessError {
+    #[error("vote {index} is for candidate {got}, expected {expected}")]
+    WrongCandidate { index: usize, got: String, expected: String },
+    #[error("vote {index} is for cycle {got}, expected {expected}")]
+    WrongCycle { index: usize, got: u64, expected: u64 },
+    #[error("vote {index} has an invalid signature")]
+    InvalidSignature { index: usize },
+}
+
+impl WitnessCertificate {
+    /// Verify every vote and return the number of **distinct** voter keys.
+    ///
+    /// Each vote must carry a valid signature and be bound to this
+    /// certificate's candidate and cycle — otherwise votes for some other block
+    /// could be presented as support for this one. Distinct keys are counted
+    /// (not votes) because one validator casting both R1 and R2 is still one
+    /// witness; counting votes would let a single validator appear to satisfy
+    /// the Dual-Witness rule alone.
+    pub fn verify(&self) -> Result<usize, WitnessError> {
+        use std::collections::HashSet;
+        let mut distinct: HashSet<Vec<u8>> = HashSet::new();
+
+        for (index, vote) in self.votes.iter().enumerate() {
+            if vote.candidate_hash != self.candidate_hash {
+                return Err(WitnessError::WrongCandidate {
+                    index,
+                    got: vote.candidate_hash.to_string(),
+                    expected: self.candidate_hash.to_string(),
+                });
+            }
+            if vote.cycle != self.cycle {
+                return Err(WitnessError::WrongCycle {
+                    index,
+                    got: vote.cycle,
+                    expected: self.cycle,
+                });
+            }
+            vote.verify()
+                .map_err(|_| WitnessError::InvalidSignature { index })?;
+            distinct.insert(vote.voter_pubkey.to_wire_bytes());
+        }
+
+        Ok(distinct.len())
+    }
 }
 
 /// A single validator's vote record within a [`BlockVotes`] witness.
@@ -151,6 +230,7 @@ mod tests {
     #[test]
     fn block_votes_cbor_roundtrip() {
         let votes = BlockVotes {
+            certificate: None,
             cycle_number: 100,
             voter_count: 3,
             strength: "Strong".to_string(),
@@ -184,5 +264,81 @@ mod tests {
         assert_eq!(decoded.unique_witness_count, 2);
         assert!(decoded.dual_witness_required);
         assert!(decoded.dual_witness_met);
+    }
+
+    // --- A2: witness certificates must be verifiable ---
+
+    fn signed_vote(cycle: u64, candidate: Hash256, round: u8)
+        -> (crate::vote::PorVote, noble_crypto::NoblePublicKey)
+    {
+        let (sk, pk) = noble_crypto::secp256k1::generate_keypair();
+        let priv_key = noble_crypto::NoblePrivateKey::Secp256k1(sk);
+        let pub_key = noble_crypto::NoblePublicKey::Secp256k1(pk);
+        let mut vote = crate::vote::PorVote::sign(cycle, candidate, &priv_key, pub_key.clone()).unwrap();
+        vote.round = round;
+        if round != 1 {
+            // Re-sign so the signature covers the round actually carried.
+            vote = crate::vote::PorVote::sign_round(cycle, candidate, round, &priv_key, pub_key.clone()).unwrap();
+        }
+        (vote, pub_key)
+    }
+
+    #[test]
+    fn certificate_verifies_and_counts_distinct_voters() {
+        let candidate = Hash256::from_bytes([0x77; 32]);
+        let (v1, _) = signed_vote(5, candidate, 1);
+        let (v2, _) = signed_vote(5, candidate, 1);
+        let cert = WitnessCertificate { cycle: 5, candidate_hash: candidate, votes: vec![v1, v2] };
+        assert_eq!(cert.verify().unwrap(), 2, "two distinct validators = two witnesses");
+    }
+
+    #[test]
+    fn certificate_rejects_a_vote_for_a_different_candidate() {
+        // Without this bind, votes for some other block could be presented as
+        // support for this one.
+        let candidate = Hash256::from_bytes([0x77; 32]);
+        let other = Hash256::from_bytes([0x88; 32]);
+        let (good, _) = signed_vote(5, candidate, 1);
+        let (foreign, _) = signed_vote(5, other, 1);
+        let cert = WitnessCertificate {
+            cycle: 5,
+            candidate_hash: candidate,
+            votes: vec![good, foreign],
+        };
+        assert!(matches!(cert.verify(), Err(WitnessError::WrongCandidate { index: 1, .. })));
+    }
+
+    #[test]
+    fn certificate_rejects_a_vote_from_a_different_cycle() {
+        let candidate = Hash256::from_bytes([0x77; 32]);
+        let (v, _) = signed_vote(9, candidate, 1);
+        let cert = WitnessCertificate { cycle: 5, candidate_hash: candidate, votes: vec![v] };
+        assert!(matches!(cert.verify(), Err(WitnessError::WrongCycle { index: 0, .. })));
+    }
+
+    #[test]
+    fn certificate_rejects_a_forged_signature() {
+        let candidate = Hash256::from_bytes([0x77; 32]);
+        let (mut v, _) = signed_vote(5, candidate, 1);
+        v.signature.signature[0] ^= 0xFF;
+        let cert = WitnessCertificate { cycle: 5, candidate_hash: candidate, votes: vec![v] };
+        assert!(matches!(cert.verify(), Err(WitnessError::InvalidSignature { index: 0 })));
+    }
+
+    #[test]
+    fn one_validator_voting_twice_counts_as_one_witness() {
+        // Dual-Witness must not be satisfiable by a single validator casting
+        // both R1 and R2 — distinct KEYS are what count.
+        let candidate = Hash256::from_bytes([0x77; 32]);
+        let (sk, pk) = noble_crypto::secp256k1::generate_keypair();
+        let priv_key = noble_crypto::NoblePrivateKey::Secp256k1(sk);
+        let pub_key = noble_crypto::NoblePublicKey::Secp256k1(pk);
+        let r1 = crate::vote::PorVote::sign(5, candidate, &priv_key, pub_key.clone()).unwrap();
+        let cert = WitnessCertificate {
+            cycle: 5,
+            candidate_hash: candidate,
+            votes: vec![r1.clone(), r1],
+        };
+        assert_eq!(cert.verify().unwrap(), 1, "same key twice is one witness");
     }
 }

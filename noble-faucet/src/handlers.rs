@@ -119,44 +119,33 @@ pub async fn handle_faucet(
         ));
     };
 
-    // Rate limit: per-IP cooldown (24h default).
-    {
-        let db = state.db.clone();
-        let ip_clone = ip.clone();
-        let cooldown = state.config.ip_cooldown_secs;
-        let is_limited =
-            db_blocking(move || db.ip_recent_distribution(&ip_clone, cooldown)).await?;
-        if is_limited {
-            return Err(error_json(&format!(
-                "Rate limited: try again {}h after the last request",
-                state.config.ip_cooldown_secs / 3600
-            )));
-        }
-    }
-
-    // Rate limit: per-address cooldown (7d default).
-    {
+    // H14: ONE atomic reserve covering both cooldowns, the daily cap, and the
+    // insert. These used to be three independent connection calls with the
+    // transfer in between, so concurrent requests could all pass the checks
+    // before any of them recorded anything — and each would be paid. The row
+    // is written BEFORE submission so a crash mid-flight leaves a visible,
+    // reconcilable reservation instead of an unrecorded payout.
+    let reservation_id = {
         let db = state.db.clone();
         let address = resolved_address.clone();
-        let cooldown = state.config.address_cooldown_secs;
-        let is_limited =
-            db_blocking(move || db.address_recent_distribution(&address, cooldown)).await?;
-        if is_limited {
-            return Err(error_json(&format!(
-                "This address already received tokens. Try again {}d after the last request",
-                state.config.address_cooldown_secs / 86400
-            )));
+        let ip_clone = ip.clone();
+        let amount = state.config.drip_amount;
+        let ip_cd = state.config.ip_cooldown_secs;
+        let addr_cd = state.config.address_cooldown_secs;
+        let cap = state.config.daily_cap;
+        match db_blocking(move || {
+            db.reserve_distribution(&address, &ip_clone, amount, ip_cd, addr_cd, cap)
+        })
+        .await?
+        {
+            Some(id) => id,
+            None => {
+                return Err(error_json(
+                    "Rate limited or daily faucet cap reached — try again later",
+                ))
+            }
         }
-    }
-
-    // Daily cap check.
-    let today = {
-        let db = state.db.clone();
-        db_blocking(move || db.today_distributed()).await?
     };
-    if today + state.config.drip_amount > state.config.daily_cap {
-        return Err(error_json("Daily faucet cap reached. Try again tomorrow"));
-    }
 
     // Send transfer: local signing (preferred) or node RPC (legacy fallback).
     let tx_id = if let Some(ref wallet) = state.wallet {
@@ -198,20 +187,23 @@ pub async fn handle_faucet(
                 state.config.drip_amount,
             )
             .await
-            .map_err(|e| internal_error(&format!("Transfer failed: {e}")))?
+            .map_err(|e| {
+                // H14: a definite pre-submit failure means no transaction was
+                // broadcast, so the reservation must be released or this
+                // address/IP stays locked out for nothing. Deliberately NOT
+                // done for unknown/timeout outcomes elsewhere — freeing the
+                // limit while a payment may still land is how you double-pay.
+                let db = state.db.clone();
+                std::thread::spawn(move || { let _ = db.release_distribution(reservation_id); });
+                internal_error(&format!("Transfer failed: {e}"))
+            })?
     };
 
-    // Record in DB.
+    // H14: attach the tx_id to the reservation made before submission.
     {
         let db = state.db.clone();
-        let address = resolved_address.clone();
-        let ip_clone = ip.clone();
-        let amount = state.config.drip_amount;
         let tx_id_clone = tx_id.clone();
-        db_blocking(move || {
-            db.record_distribution(&address, &ip_clone, amount, Some(&tx_id_clone))
-        })
-        .await?;
+        db_blocking(move || db.confirm_distribution(reservation_id, &tx_id_clone)).await?;
     }
 
     tracing::info!(

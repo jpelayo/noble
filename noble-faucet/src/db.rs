@@ -103,6 +103,104 @@ impl FaucetDb {
     }
 
     /// Record a successful distribution.
+    /// H14: atomically check every limit and RESERVE an allocation.
+    ///
+    /// The cooldown checks, the daily-cap check and the insert used to be three
+    /// separate connection calls with the transfer in between, so concurrent
+    /// requests could all pass the checks before any of them recorded anything
+    /// and each would be paid. `BEGIN IMMEDIATE` takes the write lock up front,
+    /// so the read-decide-write sequence is serialised against other faucet
+    /// workers; the row is inserted BEFORE submission, with `tx_id` filled in
+    /// afterwards by [`Self::confirm_distribution`].
+    ///
+    /// Returns the reservation id, or `Ok(None)` if a limit refused it.
+    pub fn reserve_distribution(
+        &self,
+        address: &str,
+        ip: &str,
+        amount: u64,
+        ip_cooldown_secs: u64,
+        address_cooldown_secs: u64,
+        daily_cap: u64,
+    ) -> Result<Option<i64>, FaucetError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| FaucetError::Database(e.to_string()))?;
+
+        let ip_recent: u64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM distributions \
+                 WHERE ip = ?1 AND created_at > strftime('%s','now') - ?2",
+                params![ip, ip_cooldown_secs as i64],
+                |r| r.get(0),
+            )
+            .map_err(|e| FaucetError::Database(e.to_string()))?;
+        if ip_recent > 0 {
+            return Ok(None);
+        }
+
+        let addr_recent: u64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM distributions \
+                 WHERE address = ?1 AND created_at > strftime('%s','now') - ?2",
+                params![address, address_cooldown_secs as i64],
+                |r| r.get(0),
+            )
+            .map_err(|e| FaucetError::Database(e.to_string()))?;
+        if addr_recent > 0 {
+            return Ok(None);
+        }
+
+        let today: u64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(amount), 0) FROM distributions \
+                 WHERE created_at >= strftime('%s', 'now', 'start of day')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| FaucetError::Database(e.to_string()))?;
+        if today.saturating_add(amount) > daily_cap {
+            return Ok(None);
+        }
+
+        // Reserve BEFORE submitting: a crash between here and confirmation
+        // leaves a row with no tx_id, which is a visible, reconcilable state —
+        // strictly better than paying out with no record at all.
+        tx.execute(
+            "INSERT INTO distributions (address, ip, amount, tx_id) VALUES (?1, ?2, ?3, NULL)",
+            params![address, ip, amount],
+        )
+        .map_err(|e| FaucetError::Database(e.to_string()))?;
+        let id = tx.last_insert_rowid();
+        tx.commit().map_err(|e| FaucetError::Database(e.to_string()))?;
+        Ok(Some(id))
+    }
+
+    /// H14: attach the transaction id to a reservation after submission.
+    pub fn confirm_distribution(&self, id: i64, tx_id: &str) -> Result<(), FaucetError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE distributions SET tx_id = ?2 WHERE id = ?1",
+            params![id, tx_id],
+        )
+        .map_err(|e| FaucetError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// H14: drop a reservation whose submission definitively failed before any
+    /// transaction was broadcast. Never call this on an UNKNOWN outcome — that
+    /// would free the limit while a payment may still land.
+    pub fn release_distribution(&self, id: i64) -> Result<(), FaucetError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM distributions WHERE id = ?1 AND tx_id IS NULL",
+            params![id],
+        )
+        .map_err(|e| FaucetError::Database(e.to_string()))?;
+        Ok(())
+    }
+
     pub fn record_distribution(
         &self,
         address: &str,
@@ -117,6 +215,40 @@ impl FaucetDb {
         )
         .map_err(|e| FaucetError::Database(e.to_string()))?;
         Ok(())
+    }
+
+    /// H14/L13: reservations that were never confirmed — submission returned an
+    /// UNKNOWN outcome (timeout, lost response), so a payment may or may not
+    /// have landed.
+    ///
+    /// These are deliberately NOT auto-released: freeing the limit while a
+    /// transfer might still confirm is exactly how a faucet pays twice.
+    /// Reconciliation looks each one up by request identity and either confirms
+    /// it with the real tx_id or releases it once the chain proves nothing was
+    /// sent.
+    pub fn unresolved_reservations(
+        &self,
+        older_than_secs: u64,
+    ) -> Result<Vec<(i64, String, String, u64)>, FaucetError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, address, ip, amount FROM distributions \
+                 WHERE tx_id IS NULL \
+                   AND created_at < strftime('%s','now') - ?1 \
+                 ORDER BY id",
+            )
+            .map_err(|e| FaucetError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![older_than_secs as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .map_err(|e| FaucetError::Database(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| FaucetError::Database(e.to_string()))?);
+        }
+        Ok(out)
     }
 
     /// Total amount distributed across all time.

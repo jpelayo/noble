@@ -489,6 +489,35 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         &self.fork_resolver
     }
 
+    /// Lowest height an AUTOMATIC rollback may reach (H9).
+    ///
+    /// Finality is the guarantee that committed history stops moving; a
+    /// rollback below it would rewrite blocks the node already declared
+    /// immutable. Checkpoints are the same promise at a coarser granularity,
+    /// so the floor is whichever is higher.
+    ///
+    /// Snapshot-and-drop: the fork-resolver mutex is taken and released inside
+    /// this call, so callers never hold it across the rollback work.
+    fn rollback_floor(&self) -> u64 {
+        let finalized = self.fork_resolver.lock().finalized_height();
+        // Checkpoints are generated locally every ~30 blocks and are always at
+        // or below the finalized height in practice; max() keeps the floor
+        // correct if that ever stops holding.
+        finalized.max(self.latest_checkpoint_height())
+    }
+
+    /// Height of the highest ACTIVE local checkpoint, or 0 if none.
+    ///
+    /// Only activated checkpoints bind — a checkpoint still inside its
+    /// activation delay is not yet a commitment, so treating it as a floor
+    /// would block resolutions the protocol still permits.
+    fn latest_checkpoint_height(&self) -> u64 {
+        self.consensus
+            .read()
+            .checkpoint_manager()
+            .highest_active_height()
+    }
+
     /// Inject IO channels after network and broadcast infrastructure is ready.
     /// Must be called before the event loop starts.
     pub fn set_io_channels(
@@ -2159,7 +2188,42 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             task = "fork_resolution",
             "AUTO-RESOLVING: {reason} (target height {target_height})"
         );
-        let rollback_height = self.fork_common_ancestor.map(|(h, _)| h).unwrap_or(0);
+
+        // H9: the finality floor must be compared against the ROLLBACK POINT,
+        // not the competing fork's tip.
+        //
+        // The tip-based check in `fork_resolver` only asks whether the rival
+        // chain is taller than finality — a fork can be far ahead at its tip
+        // while diverging *below* the finalized height, and rolling back to
+        // that ancestor silently rewrites finalized history. Finality is
+        // supposed to be the one thing automation cannot undo.
+        //
+        // Unknown ancestry is the dangerous case: it used to mean
+        // `unwrap_or(0)` → `rollback_to(0)` → a full wipe to genesis, chosen
+        // automatically, on the strength of peer-reported heights. Refuse
+        // instead and leave the chain intact; a deliberate reset stays
+        // available through the TOTP-gated manual RPC.
+        let Some((ancestor_height, _)) = self.fork_common_ancestor else {
+            tracing::error!(
+                task = "fork_resolution",
+                "REFUSING automatic resolution: common ancestor unknown — not resetting to genesis. \
+                 Operator action required (manual reset is available via authenticated RPC)."
+            );
+            return;
+        };
+
+        let floor = self.rollback_floor();
+        if ancestor_height < floor {
+            tracing::error!(
+                task = "fork_resolution",
+                "REFUSING automatic resolution: rollback point {ancestor_height} is below the \
+                 finality/checkpoint floor {floor} — finalized history must not be rewritten \
+                 automatically. Operator action required."
+            );
+            return;
+        }
+
+        let rollback_height = ancestor_height;
 
         // Rollback or reset storage.
         self.rollback_to(rollback_height);
@@ -2381,8 +2445,34 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             let our_score = our_height
                 .saturating_mul(10_000)
                 .saturating_add(our_weight.min(9_999));
-            let should_adopt = their_score > our_score
+            let mut should_adopt = their_score > our_score
                 || (their_score == our_score && announce.chain_id < our_chain_id);
+
+            // M5: adoption WIPES our chain, so it must not run on numbers a peer
+            // simply asserted. `chain_tip_height` and `chain_vote_weight` are
+            // self-reported and cost nothing to inflate; a tip HASH is the
+            // minimum checkable commitment — it names a specific block we will
+            // then have to sync and validate, and a peer that cannot name one
+            // has given us nothing to verify against.
+            //
+            // This is deliberately the *cheap* half of M5. It does not fully
+            // satisfy "require validated block material before wiping": the
+            // wipe still precedes validating their block 1. The exposure is
+            // bounded — adoption only fires while our own chain is at or below
+            // EARLY_CHAIN_HEIGHT_LIMIT (5 blocks), inside the same trusted
+            // early window that C4 was de-scoped for — but it is a real
+            // residual, recorded rather than papered over.
+            if should_adopt && announce.chain_tip_hash.is_none() {
+                tracing::warn!(
+                    task = "chain_adoption",
+                    "refusing early-chain adoption of {:#010X} from {}: advertised height {} with no tip hash \
+                     (nothing checkable to adopt toward)",
+                    announce.chain_id,
+                    announce.node_name,
+                    their_height,
+                );
+                should_adopt = false;
+            }
 
             if should_adopt {
                 let reason = format!(
@@ -2640,6 +2730,47 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             None
         };
 
+        // H8: anchor the imported history to OUR genesis.
+        //
+        // At tip_height == 0 there is no parent header, so B2 (prev_hash) is
+        // skipped and block 1 was accepted on its signature alone — a syncing
+        // node could be handed a fabricated origin and would then extend it,
+        // which is the long-range / false-history attack fork-prevention
+        // Layer 3 names. The anchor is per-deployment and already on disk: our
+        // own genesis block. No shipped checkpoint set, no release authority.
+        if block.header.height == 1 {
+            let genesis_hash = {
+                let storage = self.storage.read();
+                storage.get_block_hash_by_height(0).ok()
+            };
+            match genesis_hash {
+                Some(expected) => {
+                    if block.header.prev_block_hash != expected {
+                        tracing::warn!(
+                            task = "sync_import",
+                            "rejecting block 1: prev_block_hash {} does not descend from our genesis {}",
+                            block.header.prev_block_hash,
+                            expected
+                        );
+                        return SyncImportResult::Rejected {
+                            reason: "block 1 does not descend from the configured genesis".to_string(),
+                        };
+                    }
+                }
+                None => {
+                    // No genesis on disk: we have nothing to anchor against, so
+                    // there is no safe way to accept someone else's origin.
+                    tracing::warn!(
+                        task = "sync_import",
+                        "rejecting block 1: no local genesis to anchor against"
+                    );
+                    return SyncImportResult::Rejected {
+                        reason: "no local genesis block to anchor block 1 against".to_string(),
+                    };
+                }
+            }
+        }
+
         let validator_list = self.consensus.read().validator_snapshot()
             .map(|snap| snap.pubkey_vec.clone())
             .unwrap_or_default();
@@ -2706,17 +2837,26 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             }
         };
 
-        let tx_ids: Vec<Hash256> = block
+        // L8: one failed tx_id must REJECT the block, not silently shorten the
+        // list. `filter_map` dropped failures, so `tx_ids` could come back
+        // shorter than `block.transactions` — and those ids are what the Merkle
+        // root and every storage index are built from. A short list means
+        // committing a block whose transactions are not all indexed, with a
+        // Merkle root that cannot match.
+        let tx_ids: Vec<Hash256> = match block
             .transactions
             .iter()
-            .filter_map(|tx| {
-                tx.compute_tx_id(chain_id)
-                    .map_err(|e| {
-                        tracing::warn!(task = "sync_import", "tx_id computation failed: {e}");
-                    })
-                    .ok()
-            })
-            .collect();
+            .map(|tx| tx.compute_tx_id(chain_id))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(task = "sync_import", "tx_id computation failed: {e}");
+                return SyncImportResult::Rejected {
+                    reason: format!("tx_id computation failed: {e}"),
+                };
+            }
+        };
 
         // Decay-weighted vote accumulation.
         let old = self.chain_vote_weight.load(Ordering::Relaxed);
@@ -2816,7 +2956,70 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         // Validate CBOR before storing: prevents corrupted/malicious data from propagating.
         if let Some(vd) = vote_data {
             match <noble_consensus::BlockVotes as noble_codec::NobleCbor>::from_cbor(vd) {
-                Ok(_parsed) => {
+                Ok(parsed) => {
+                    // H8/M10: a successful CBOR decode proves only that the
+                    // bytes are well-formed. Previously the parsed value was
+                    // discarded (`Ok(_parsed)`) and the blob stored as-is, so a
+                    // peer could hand us any validator names it liked and we
+                    // would persist them as this block's "legitimacy proof".
+                    //
+                    // Verify the signed certificate instead, when present: every
+                    // vote must carry a valid signature and be bound to this
+                    // block's candidate hash and cycle. A certificate that fails
+                    // is DISCARDED rather than stored — the block itself already
+                    // passed validation and commit, so refusing the witness data
+                    // costs us a legitimacy record, not the chain.
+                    //
+                    // Scope limit (documented, do not overstate): this proves
+                    // signed SUPPORT, not that it was the network majority at
+                    // the time. Open consensus records no historical membership.
+                    let witness_ok = match &parsed.certificate {
+                        Some(cert) => {
+                            if cert.candidate_hash != block_hash {
+                                tracing::warn!(
+                                    task = "sync",
+                                    "discarding witness certificate for height {}: certificate names candidate {} but the block is {}",
+                                    block.header.height,
+                                    cert.candidate_hash,
+                                    block_hash
+                                );
+                                false
+                            } else {
+                                match cert.verify() {
+                                    Ok(witnesses) => {
+                                        tracing::debug!(
+                                            task = "sync",
+                                            "verified {witnesses} witness signature(s) for synced block {}",
+                                            block.header.height
+                                        );
+                                        true
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            task = "sync",
+                                            "discarding unverifiable witness certificate for height {}: {e}",
+                                            block.header.height
+                                        );
+                                        false
+                                    }
+                                }
+                            }
+                        }
+                        // No certificate: tallies alone are unverifiable, so
+                        // they are not stored as proof of anything.
+                        None => {
+                            tracing::debug!(
+                                task = "sync",
+                                "synced vote witness for height {} carries no certificate — not stored",
+                                block.header.height
+                            );
+                            false
+                        }
+                    };
+
+                    if !witness_ok {
+                        // Fall through without storing.
+                    } else {
                     let storage = self.storage.read();
                     if let Err(e) = storage.store_block_votes(block.header.height, vd) {
                         tracing::warn!(
@@ -2830,6 +3033,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                             "stored vote witness for synced block {}",
                             block.header.height
                         );
+                    }
                     }
                 }
                 Err(e) => {

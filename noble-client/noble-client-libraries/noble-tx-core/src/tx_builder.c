@@ -168,15 +168,46 @@ void tx_encode_full(noble_buf_t *buf, const noble_tx_t *tx) {
 //   - No "issuer_sig" or "additional_sigs"
 //   - Metadata sorted by key before encoding
 
-// Comparison function for qsort on metadata (sort by key, alphabetical).
+// Canonical metadata ordering: by key, then by value.
+//
+// MIRRORS noble-core `metadata::canonical_cmp`. The value tiebreaker is
+// load-bearing, not cosmetic: duplicate keys are legal, so comparing keys alone
+// is NOT a total order — and qsort is not required to be stable, while Rust's
+// sort is. Two entries sharing a key could therefore be ordered differently
+// here than in Rust, producing a different signing payload (and so a different
+// signature and tx_id) for the same transaction. Comparing the value removes
+// the ambiguity in both languages without relying on sort stability.
+//
+// Values are length-prefixed byte strings, not NUL-terminated, so compare with
+// memcmp over the shorter length and break ties on length.
 static int metadata_cmp(const void *a, const void *b) {
     const noble_metadata_t *ma = (const noble_metadata_t *)a;
     const noble_metadata_t *mb = (const noble_metadata_t *)b;
-    return strcmp(ma->key, mb->key);
+    int k = strcmp(ma->key, mb->key);
+    if (k != 0) return k;
+    size_t n = ma->value_len < mb->value_len ? ma->value_len : mb->value_len;
+    int v = memcmp(ma->value, mb->value, n);
+    if (v != 0) return v;
+    if (ma->value_len < mb->value_len) return -1;
+    if (ma->value_len > mb->value_len) return 1;
+    return 0;
+}
+
+// Sort a transaction's metadata into canonical order, in place.
+//
+// noble-core rejects a transaction whose metadata is not canonically ordered
+// on the wire (T9b), because duplicate keys are legal and protocol readers take
+// the FIRST match — so an in-transit reordering would change meaning while the
+// signature still verified. Builders must therefore canonicalise BEFORE signing:
+// the wire bytes and the signing payload have to agree.
+void tx_canonicalize_metadata(noble_tx_t *tx) {
+    if (tx == NULL || tx->metadata_count < 2) return;
+    qsort(tx->metadata, tx->metadata_count, sizeof(noble_metadata_t), metadata_cmp);
 }
 
 void tx_encode_signing_payload(noble_buf_t *buf, const noble_tx_t *tx, uint32_t chain_id) {
     size_t field_count = 8;
+    if (tx->declared_cosigner_count > 0) field_count++;
     if (tx->expires_at != 0)          field_count++;
     if (tx->gateway_address_len > 0)  field_count++;
 
@@ -189,6 +220,17 @@ void tx_encode_signing_payload(noble_buf_t *buf, const noble_tx_t *tx, uint32_t 
     // "checksum"
     cbor_write_text(buf, "checksum", 8);
     encode_hash256(buf, tx->checksum);
+
+    // "declared_cosigners" — omitted when empty (CS1). Alphabetically between
+    // "checksum" and "expires_at". MIRRORS noble-core wire/v1.rs: an array of
+    // wire-form public keys.
+    if (tx->declared_cosigner_count > 0) {
+        cbor_write_text(buf, "declared_cosigners", 18);
+        cbor_write_array(buf, tx->declared_cosigner_count);
+        for (uint8_t i = 0; i < tx->declared_cosigner_count; i++) {
+            cbor_write_bytes(buf, tx->declared_cosigners[i], tx->declared_cosigner_lens[i]);
+        }
+    }
 
     // "expires_at" — omitted when 0
     if (tx->expires_at != 0) {
@@ -260,6 +302,7 @@ static void encode_sig_envelope_wire(noble_buf_t *buf, const noble_sig_envelope_
 
 void tx_encode_wire_full(noble_buf_t *buf, const noble_tx_t *tx) {
     size_t field_count = 9;
+    if (tx->declared_cosigner_count > 0) field_count++;
     if (tx->expires_at != 0)          field_count++;
     if (tx->gateway_address_len > 0)  field_count++;
 
@@ -275,6 +318,17 @@ void tx_encode_wire_full(noble_buf_t *buf, const noble_tx_t *tx) {
     // "checksum"
     cbor_write_text(buf, "checksum", 8);
     encode_hash256(buf, tx->checksum);
+
+    // "declared_cosigners" — omitted when empty (CS1). Alphabetically between
+    // "checksum" and "expires_at". MIRRORS noble-core wire/v1.rs: an array of
+    // wire-form public keys.
+    if (tx->declared_cosigner_count > 0) {
+        cbor_write_text(buf, "declared_cosigners", 18);
+        cbor_write_array(buf, tx->declared_cosigner_count);
+        for (uint8_t i = 0; i < tx->declared_cosigner_count; i++) {
+            cbor_write_bytes(buf, tx->declared_cosigners[i], tx->declared_cosigner_lens[i]);
+        }
+    }
 
     // "expires_at" — omitted when 0
     if (tx->expires_at != 0) {

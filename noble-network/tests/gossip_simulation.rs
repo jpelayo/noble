@@ -515,6 +515,7 @@ async fn gossip_tx_relay_end_to_end() {
             signature: vec![],
         },
         additional_sigs: vec![],
+        declared_cosigners: Vec::new(),
         metadata: vec![],
         encrypted_locator: None,
         external_attestations: vec![],

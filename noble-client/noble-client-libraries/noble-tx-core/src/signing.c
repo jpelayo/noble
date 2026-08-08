@@ -127,7 +127,14 @@ int sign_and_encode_tx(
     memset(tx->issuer_sig.signature, 0, SIG_LEN);
     tx->issuer_sig.signature_len = 64;
 
-    // 3. Compute signing message = SHA-256(signing_payload_cbor).
+    // 3. Canonicalise metadata BEFORE signing (T9b).
+    //    noble-core rejects a transaction whose wire metadata is not in
+    //    canonical order, and the signature must cover the order actually
+    //    transmitted — so this has to happen before the message is computed,
+    //    not at encode time.
+    tx_canonicalize_metadata(tx);
+
+    // 4. Compute signing message = SHA-256(signing_payload_cbor).
     uint8_t msg[SHA256_DIGEST_SIZE];
     compute_signing_message(tx, chain_id, msg);
 

@@ -174,6 +174,40 @@ impl std::fmt::Display for TotpScope {
 ///
 /// Exposed for use by dashboard/client code that needs to determine
 /// whether to include auth headers.
+/// Operator/write methods this build recognises.
+///
+/// Not an authorisation list — classification for metrics only (M13). Write
+/// methods are already gated by requiring TOTP for anything absent from
+/// [`READ_METHODS`]; naming them here just keeps their latency series instead
+/// of collapsing them into `other`.
+pub static WRITE_METHODS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    HashSet::from([
+        "importMnemonic", "importSecp256k1Key", "setConfigValue",
+        "uploadTlsCert", "resetChain", "rotateTotpSecret",
+        "rotateGatewayKey", "rotateFaucetAdminToken",
+        "getFaucetAdminToken", "walletUnlock", "setEncryptionMode",
+        "getTraceBuffer", "setTraceFilter", "generateMnemonic",
+        "backupChain", "checkDataDir", "listDirectory",
+        "setStoragePaths", "reconcileStorage",
+    ])
+});
+
+/// M13: whether `method` is a name this build knows about.
+///
+/// Used to bound metrics label cardinality — an unknown name must not mint a
+/// permanent time series. Deliberately generous: anything in the read or
+/// legacy-public tables, plus anything carrying the `noble_` prefix (those are
+/// our own registered methods; a typo'd one still collapses to `other` because
+/// it will not be in either table).
+pub fn is_known_method(method: &str) -> bool {
+    let bare = method.strip_prefix("noble_").unwrap_or(method);
+    READ_METHODS.contains(method)
+        || READ_METHODS.contains(bare)
+        || LEGACY_PUBLIC_METHODS.contains(method)
+        || LEGACY_PUBLIC_METHODS.contains(bare)
+        || WRITE_METHODS.contains(bare)
+}
+
 pub fn is_read_method(method: &str) -> bool {
     let name = method.strip_prefix("noble_").unwrap_or(method);
     READ_METHODS.contains(name) || LEGACY_PUBLIC_METHODS.contains(name)

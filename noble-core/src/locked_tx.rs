@@ -237,6 +237,7 @@ mod tests {
             timestamp: 1000,
             issuer_sig: SignatureEnvelope { scheme_id: 0x02, public_key: vec![0; 33], signature: vec![0; 64] },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![
                 // Insert in non-alphabetical order to test sorting
                 MetadataEntry { key: "title".into(), value: hex::encode(&title_ct).into_bytes() },

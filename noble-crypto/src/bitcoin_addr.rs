@@ -86,14 +86,31 @@ pub fn pubkey_to_p2wpkh(compressed: &[u8; 33], mainnet: bool) -> String {
 /// Applies the BIP-341 key-path-only tweak: `Q = P + tagged_hash("TapTweak", x(P)) · G`
 /// and encodes the tweaked x-only output key as a Bech32m address.
 pub fn pubkey_to_p2tr(compressed: &[u8; 33], mainnet: bool) -> String {
-    let output_key = taproot_tweak_pubkey(compressed)
-        .expect("valid secp256k1 key must produce valid tweak");
+    // Never panics: this is a formatting path reached from RPC responses and
+    // CLI output, and the 33 bytes are not guaranteed to be a valid curve
+    // point (they can arrive from decoded/stored material). A key that cannot
+    // be tweaked renders as a clearly-invalid placeholder instead of aborting
+    // the process. Callers that need to distinguish should use
+    // [`try_pubkey_to_p2tr`].
+    try_pubkey_to_p2tr(compressed, mainnet)
+        .unwrap_or_else(|| INVALID_ADDRESS_PLACEHOLDER.to_string())
+}
+
+/// Rendered in place of an address that cannot be derived. Deterministic and
+/// syntactically invalid as an address, so it can never be mistaken for one.
+pub const INVALID_ADDRESS_PLACEHOLDER: &str = "<invalid-key>";
+
+/// Fallible form of [`pubkey_to_p2tr`]: `None` when `compressed` is not a valid
+/// secp256k1 point and therefore has no Taproot output key.
+pub fn try_pubkey_to_p2tr(compressed: &[u8; 33], mainnet: bool) -> Option<String> {
+    let output_key = taproot_tweak_pubkey(compressed)?;
+    // HRPs are compile-time constants, so these parses cannot fail.
     let hrp = if mainnet {
-        bech32::Hrp::parse("bc").unwrap()
+        bech32::Hrp::parse("bc").expect("const HRP")
     } else {
-        bech32::Hrp::parse("tb").unwrap()
+        bech32::Hrp::parse("tb").expect("const HRP")
     };
-    encode_segwit(hrp, 1, &output_key)
+    Some(encode_segwit(hrp, 1, &output_key))
 }
 
 /// Derive the BIP-341 Taproot output key from a compressed secp256k1 public key.
@@ -603,5 +620,31 @@ mod tests {
         // Empty string
         let result = decode_wif("");
         assert!(result.is_err(), "empty WIF should be rejected");
+    }
+
+    // --- L25: taproot display path must never panic ---
+
+    #[test]
+    fn pubkey_to_p2tr_never_panics_on_invalid_curve_points() {
+        // The 33 bytes are not guaranteed to be a valid secp256k1 point — they
+        // can come from decoded wire data or stored material. This is a display
+        // path (RPC/CLI), so an untweakable key must render a placeholder
+        // rather than abort the process.
+        for pattern in [[0x00u8; 33], [0xFFu8; 33], [0x02u8; 33], [0x07u8; 33]] {
+            let rendered = pubkey_to_p2tr(&pattern, true); // must not panic
+            match try_pubkey_to_p2tr(&pattern, true) {
+                Some(addr) => assert_eq!(rendered, addr),
+                None => assert_eq!(rendered, INVALID_ADDRESS_PLACEHOLDER),
+            }
+        }
+    }
+
+    #[test]
+    fn pubkey_to_p2tr_valid_key_unchanged() {
+        let (_sk, pk) = crate::secp256k1::generate_keypair();
+        let compressed: [u8; 33] = pk.as_slice().try_into().unwrap();
+        let addr = pubkey_to_p2tr(&compressed, true);
+        assert!(addr.starts_with("bc1p"), "got {addr}");
+        assert_ne!(addr, INVALID_ADDRESS_PLACEHOLDER);
     }
 }

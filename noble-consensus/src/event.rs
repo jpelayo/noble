@@ -49,6 +49,20 @@ pub enum CycleIo {
         category: noble_core::BanCategoryCode,
         reason: String,
     },
+    /// Penalize a VALIDATOR identity for cryptographically proven misbehaviour.
+    ///
+    /// Distinct from [`Self::BanPeer`], which acts on a transport peer. When
+    /// misbehaviour is proven by evidence bound to a signing key — vote
+    /// equivocation, double proposal — the culprit is that key, not whichever
+    /// peer happened to relay the message. Banning the relay punished honest
+    /// nodes for carrying traffic while the real offender kept participating
+    /// through other routes.
+    PenalizeValidator {
+        /// Wire-format public key of the misbehaving validator.
+        validator: Vec<u8>,
+        category: noble_core::BanCategoryCode,
+        reason: String,
+    },
     /// Request a specific block from a peer.
     RequestBlock {
         peer_id: Vec<u8>,

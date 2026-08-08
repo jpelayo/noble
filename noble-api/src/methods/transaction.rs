@@ -40,9 +40,10 @@ struct StorageUtxoLookup<'a, S: StorageEngine> {
 }
 
 impl<S: StorageEngine> UtxoLookup for StorageUtxoLookup<'_, S> {
-    fn get_utxo(&self, outpoint: &noble_core::OutPoint) -> Option<(u64, bool, u64)> {
+    fn get_utxo(&self, outpoint: &noble_core::OutPoint) -> Option<noble_core::UtxoEntry> {
+        // Full entry: admission needs `address` to enforce input ownership (C1).
         match self.storage.get_utxo(outpoint) {
-            Ok(Some(entry)) => Some((entry.value, entry.is_coinbase, entry.height)),
+            Ok(Some(entry)) => Some(entry),
             _ => None,
         }
     }

@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use noble_codec::NobleCbor;
-use noble_crypto::{is_recognized_scheme, Hash256, NoblePublicKey, SCHEME_BIP137};
+use noble_crypto::{is_signing_scheme, Hash256, NoblePublicKey, SCHEME_BIP137};
 
 use crate::block::{Block, BlockHeader};
 use crate::constants::*;
@@ -75,7 +75,7 @@ pub struct BlockValidationContext<'a> {
 /// - Message is reconstructed from tx fields
 /// - Public key is recovered from the recoverable signature
 /// - Recovered key matches the declared public key
-fn validate_bip137_signature(tx: &Transaction, _chain_id: u32) -> Result<(), ValidationError> {
+fn validate_bip137_signature(tx: &Transaction, chain_id: u32) -> Result<(), ValidationError> {
     use noble_crypto::bip137;
 
     let sig = &tx.issuer_sig;
@@ -96,26 +96,20 @@ fn validate_bip137_signature(tx: &Transaction, _chain_id: u32) -> Result<(), Val
         )));
     }
 
-    // Reconstruct the canonical message from tx fields (UTXO model).
-    // For BIP-137, we use output[0] as recipient and total_output_value as amount.
-    // Fee is implicit (not in the BIP-137 message — the signature commits via SigningPayload).
-    let is_transfer_msg = crate::tx_types::handler_for(tx.tx_type)
-        .map_or(false, |h| h.uses_transfer_bip137_message());
-    let message = if is_transfer_msg {
-        let recipient_hex = tx.outputs.first()
-            .map(|o| hex::encode(o.address.to_wire_bytes()))
-            .unwrap_or_default();
-        let amount = tx.outputs.first().map_or(0, |o| o.value);
-        bip137::transfer_message(
-            &recipient_hex,
-            amount,
-            tx.timestamp,
-            0, // fee is implicit in UTXO model
-            tx.version,
-        )
-    } else {
-        bip137::notarization_message(&tx.checksum.to_string(), tx.timestamp, 0, tx.version)
-    };
+    // H1: the message commits to the FULL signing payload, so one signature
+    // covers every field — inputs included. The old per-type messages named
+    // only a few fields (recipient/amount/timestamp), which let a signature be
+    // replayed onto a transaction that kept `outputs[0]` but added more of the
+    // signer's own inputs and dropped the change, turning the surplus into fee.
+    // Ownership validation cannot catch that: those inputs are genuinely the
+    // signer's.
+    let payload_hash = tx
+        .compute_signing_message_for_chain(chain_id)
+        .map_err(|e| {
+            tracing::debug!("signing payload hash failed: {e}");
+            ValidationError::Internal("signing payload hash failed".into())
+        })?;
+    let message = bip137::tx_message(chain_id, &payload_hash);
 
     // Recover the public key from the BIP-137 signature
     let recovered_pk = bip137::verify_bip137(&sig.signature, &message)
@@ -211,7 +205,7 @@ fn validate_tx_protocol_fields(
     }
 
     // T5: Issuer scheme recognized
-    if !is_recognized_scheme(tx.issuer_sig.scheme_id) {
+    if !is_signing_scheme(tx.issuer_sig.scheme_id) {
         return Err(ValidationError::UnrecognizedScheme(
             tx.issuer_sig.scheme_id,
         ));
@@ -253,13 +247,52 @@ fn validate_tx_signatures(
     }
 
     // T7: Additional signature verification
+    //
+    // CS1: each co-signature must come from a key the ISSUER declared. Without
+    // this, T7 verified a signature against its own embedded key and nothing
+    // else — so anyone could append a valid signature to a transaction in
+    // flight and put themselves on a permanent public record they had no part
+    // in. An empty declared set means no co-signatures are accepted at all.
+    let declared: std::collections::HashSet<Vec<u8>> = tx
+        .declared_cosigners
+        .iter()
+        .map(|pk| pk.to_wire_bytes())
+        .collect();
+    let mut seen_cosigners: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+
     for (i, sig) in tx.additional_sigs.iter().enumerate() {
-        if !is_recognized_scheme(sig.scheme_id) {
+        if !is_signing_scheme(sig.scheme_id) {
             return Err(ValidationError::AdditionalSigInvalid {
                 index: i,
                 reason: format!("unrecognized scheme {:#04x}", sig.scheme_id),
             });
         }
+
+        let signer_wire = match sig.to_noble_public_key() {
+            Ok(pk) => pk.to_wire_bytes(),
+            Err(e) => {
+                return Err(ValidationError::AdditionalSigInvalid {
+                    index: i,
+                    reason: format!("undecodable signer key: {e}"),
+                })
+            }
+        };
+
+        if !declared.contains(&signer_wire) {
+            return Err(ValidationError::AdditionalSigInvalid {
+                index: i,
+                reason: "signer was not declared by the issuer".into(),
+            });
+        }
+        // One signature per declared key — repeats would inflate the apparent
+        // number of endorsers without adding a distinct one.
+        if !seen_cosigners.insert(signer_wire) {
+            return Err(ValidationError::AdditionalSigInvalid {
+                index: i,
+                reason: "duplicate co-signature from the same key".into(),
+            });
+        }
+
         sig.verify_standalone(&signing_msg).map_err(|e| {
             tracing::debug!("additional signature {i} verification failed: {e}");
             ValidationError::AdditionalSigInvalid {
@@ -505,8 +538,13 @@ pub fn validate_transaction_structure(
 
     validate_tx_type_and_advanced(tx)?;
 
-    // T31/T32: Source address ownership + activation enforcement (S34)
-    validate_source_address(tx, ctx.chain_height)?;
+    // C1: Input ownership is NOT checked here. It needs the resolved UTXOs
+    // (their addresses live in the UTXO set, not in the transaction), so it is
+    // enforced by `stateful_validation::validate_resolved_inputs` at every
+    // stateful path: mempool admission, block commit on both backends, and sync
+    // import. The former `validate_source_address` no-op that sat here was
+    // removed — it took only (tx, chain_height), so it could never have
+    // enforced ownership, while its name implied it did.
 
     // T18-T20: Validator identity checks deferred to consensus (needs validator list)
 
@@ -514,94 +552,21 @@ pub fn validate_transaction_structure(
     Ok(())
 }
 
-/// Validate source address — NO-OP in UTXO model.
-///
-/// In the account model, `source_address` indicated which balance bucket to debit.
-/// In the UTXO model, the debit source is determined by which UTXOs are in the inputs.
-/// This function is retained for API compatibility but does nothing.
-pub fn validate_source_address(_tx: &Transaction, _chain_height: u64) -> Result<(), ValidationError> {
-    // UTXO model: no source_address field. Debit is implicit from input UTXOs.
-    Ok(())
-}
-
-
-/// Compute the median of a slice of timestamps.
-///
-/// Returns 0 for an empty slice.
-pub fn median_timestamp(timestamps: &[u64]) -> u64 {
-    if timestamps.is_empty() {
-        return 0;
-    }
-    let mut sorted = timestamps.to_vec();
-    sorted.sort_unstable();
-    sorted[sorted.len() / 2]
-}
-
-/// Validate a block's timestamp against B5, B6, and B13 (median-of-11).
-///
-/// This consolidates all timestamp checks into one function for the consensus layer:
-/// - Monotonicity (B5): `block_timestamp > parent_timestamp` (always)
-/// - Median-of-11 (B13): `block_timestamp >= median(recent_timestamps)` (RealTime only)
-/// - Future skew (B6): `block_timestamp <= wall_clock + tolerance` (always, tolerance varies)
-/// - Past skew (B6): `wall_clock <= block_timestamp + tolerance` (RealTime only)
-#[tracing::instrument(skip(recent_timestamps), fields(task = "block_validation"))]
-pub fn validate_block_timestamp(
-    block_timestamp: u64,
-    parent_timestamp: u64,
-    recent_timestamps: &[u64],
-    time_context: TimeContext,
-) -> Result<(), ValidationError> {
-    // B5: Monotonicity — always enforced, no relaxation.
-    if block_timestamp <= parent_timestamp {
-        return Err(ValidationError::TimestampNotAfterParent {
-            block_time: block_timestamp,
-            parent_time: parent_timestamp,
-        });
-    }
-
-    match time_context {
-        TimeContext::RealTime { wall_clock } => {
-            // B13: Median-of-11
-            if !recent_timestamps.is_empty() {
-                let median = median_timestamp(recent_timestamps);
-                if block_timestamp < median {
-                    return Err(ValidationError::BlockTimestampBeforeMedian {
-                        block_time: block_timestamp,
-                        median,
-                    });
-                }
-            }
-            // B6: Future skew (strict)
-            if block_timestamp > wall_clock + MAX_BLOCK_FUTURE_SKEW {
-                return Err(ValidationError::BlockTimestampSkew {
-                    block_time: block_timestamp,
-                    current_time: wall_clock,
-                });
-            }
-            // B6: Past skew (strict)
-            if wall_clock > block_timestamp + MAX_BLOCK_PAST_SKEW {
-                return Err(ValidationError::BlockTimestampSkew {
-                    block_time: block_timestamp,
-                    current_time: wall_clock,
-                });
-            }
-        }
-        TimeContext::Historical { wall_clock, .. } => {
-            // B13: Skipped — recent timestamps are unreliable after rollback.
-            // B6: Future guard only (relaxed tolerance) — no importing future blocks.
-            if block_timestamp > wall_clock + SYNC_BLOCK_FUTURE_TOLERANCE {
-                return Err(ValidationError::BlockTimestampSkew {
-                    block_time: block_timestamp,
-                    current_time: wall_clock,
-                });
-            }
-            // B6: Past skew NOT checked — historical blocks ARE old.
-            // B5 monotonicity (above) enforces temporal ordering.
-        }
-    }
-
-    Ok(())
-}
+// B13 (median-of-11) and the standalone `validate_block_timestamp` helper were
+// REMOVED here: they had no production caller. `validate_block` performs its own
+// B5 (monotonicity) and B6 (skew) checks inline below, so the median rule was
+// dead code that read as an active protocol rule — the dangerous kind of dead
+// code, because it invites the reader to assume a bound that is not enforced.
+//
+// The ACTIVE timestamp bounds are, in `validate_block`:
+//   B5  block.timestamp must be strictly greater than the parent's
+//   B6  block.timestamp within [now - MAX_BLOCK_PAST_SKEW, now + MAX_BLOCK_FUTURE_SKEW]
+// with a relaxed future tolerance during historical sync import.
+//
+// Activating median-of-11 instead of deleting it was the alternative; it was not
+// taken because it needs the prior 11 headers threaded into every acceptance
+// path (live, proposal, sync, integrity) to mean anything, and the existing
+// asymmetric skew window already bounds manipulation.
 
 /// Validate a block against rules B1-B12.
 ///
@@ -816,7 +781,7 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
     );
 
     // B12: Validator scheme recognized
-    if !is_recognized_scheme(header.validator_id.scheme_id()) {
+    if !is_signing_scheme(header.validator_id.scheme_id()) {
         return Err(ValidationError::ValidatorSchemeUnrecognized(
             header.validator_id.scheme_id(),
         ));
@@ -872,6 +837,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -1247,6 +1213,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -1311,6 +1278,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -1355,6 +1323,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -1394,6 +1363,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -1437,6 +1407,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -1477,6 +1448,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -1513,6 +1485,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -1529,80 +1502,11 @@ mod tests {
         assert!(result.is_ok(), "notarization without outputs should pass: {result:?}");
     }
 
-    // --- validate_block_timestamp (B5/B6/B13) ---
+    // The `validate_block_timestamp` / `median_timestamp` tests were removed
+    // together with the dead B13 median-of-11 path. The ACTIVE timestamp rules
+    // (B5 monotonicity, B6 skew) are exercised through `validate_block` by the
+    // block-validation tests below, which is the path production actually runs.
 
-    #[test]
-    fn b5_block_timestamp_before_parent_rejected() {
-        let result = validate_block_timestamp(
-            999,   // block timestamp
-            1_000, // parent timestamp (higher)
-            &[],
-            TimeContext::RealTime { wall_clock: 1_700_000_000 },
-        );
-        assert!(matches!(
-            result,
-            Err(ValidationError::TimestampNotAfterParent { .. })
-        ));
-    }
-
-    #[test]
-    fn b13_block_timestamp_before_median_rejected() {
-        // Median of [100, 200, 300, 400, 500] = 300
-        let recent = vec![100, 200, 300, 400, 500];
-        let result = validate_block_timestamp(
-            250, // below median of 300
-            200, // parent (ok, 250 > 200)
-            &recent,
-            TimeContext::RealTime { wall_clock: 1_700_000_000 },
-        );
-        assert!(matches!(
-            result,
-            Err(ValidationError::BlockTimestampBeforeMedian { .. })
-        ));
-    }
-
-    #[test]
-    fn b6_block_timestamp_too_far_future() {
-        let now = 1_700_000_000;
-        let result = validate_block_timestamp(
-            now + MAX_BLOCK_FUTURE_SKEW + 1, now, &[],
-            TimeContext::RealTime { wall_clock: now },
-        );
-        assert!(matches!(
-            result,
-            Err(ValidationError::BlockTimestampSkew { .. })
-        ));
-    }
-
-    #[test]
-    fn valid_block_timestamp_passes_all_checks() {
-        let now = 1_700_000_000;
-        let recent = vec![now - 100, now - 90, now - 80, now - 70, now - 60];
-        let result = validate_block_timestamp(
-            now + 10, // slightly in the future
-            now,      // parent
-            &recent,
-            TimeContext::RealTime { wall_clock: now + 10 },
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn median_timestamp_odd_count() {
-        assert_eq!(median_timestamp(&[3, 1, 2]), 2);
-        assert_eq!(median_timestamp(&[10, 30, 20, 40, 50]), 30);
-    }
-
-    #[test]
-    fn median_timestamp_even_count() {
-        // For even count, picks the upper-middle element
-        assert_eq!(median_timestamp(&[1, 2, 3, 4]), 3);
-    }
-
-    #[test]
-    fn median_timestamp_empty() {
-        assert_eq!(median_timestamp(&[]), 0);
-    }
 
     // --- T22: Encrypted locator on non-notarization ---
 
@@ -1642,6 +1546,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: Some(locator),
             external_attestations: vec![],
@@ -1692,6 +1597,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: Some(locator),
             external_attestations: vec![],
@@ -1741,6 +1647,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![attestation],
@@ -1787,6 +1694,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![attestation],
@@ -1938,6 +1846,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -1984,6 +1893,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2046,6 +1956,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2082,6 +1993,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2115,12 +2027,11 @@ mod tests {
         let checksum = sha256(b"bip137 test document");
         let timestamp = 1_700_000_000u64;
 
-        // In UTXO model, fee is implicit (0 in BIP-137 message).
-        let message =
-            bip137::notarization_message(&checksum.to_string(), timestamp, 0, PROTOCOL_VERSION);
-        let sig = bip137::sign_bip137(&sk, &message).unwrap();
-
-        let tx = Transaction {
+        // H1: the message is derived from the finished transaction's signing
+        // payload, so the transaction must be built FIRST and signed second.
+        // The payload excludes signatures, so a placeholder signature does not
+        // affect the digest.
+        let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_NOTARIZATION,
             inputs: vec![TxIn {
@@ -2132,9 +2043,10 @@ mod tests {
             issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_BIP137,
                 public_key: compressed_pk,
-                signature: sig.to_vec(),
+                signature: vec![0u8; bip137::BIP137_SIG_LEN],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2142,6 +2054,12 @@ mod tests {
         contract_data: None,
         expires_at: None,
         };
+
+        let payload_hash = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        let message = bip137::tx_message(test_chain_id(), &payload_hash);
+        let sig = bip137::sign_bip137(&sk, &message).unwrap();
+        tx.issuer_sig.signature = sig.to_vec();
+
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         (tx, tx_id)
     }
@@ -2150,6 +2068,96 @@ mod tests {
     fn t26_valid_bip137_notarization_passes() {
         let (tx, tx_id) = make_bip137_notarization_tx();
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
+    }
+
+    #[test]
+    fn cs1_undeclared_cosigner_is_rejected() {
+        // Without CS1, T7 verified an additional signature against its own
+        // embedded key and nothing else — so a stranger could append a valid
+        // signature to a transaction in flight and land on a permanent public
+        // record. For a chain that exists to prove WHO vouched for a document,
+        // a signer list anyone can add themselves to proves nothing.
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (mut tx, _) = make_signed_tx(&sk, &pk);
+
+        let (other_sk, _other_pk) = secp256k1::generate_keypair();
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        let other = NoblePrivateKey::Secp256k1(other_sk);
+        tx.additional_sigs.push(other.sign(&msg).unwrap());
+
+        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(
+            matches!(result, Err(ValidationError::AdditionalSigInvalid { index: 0, .. })),
+            "an undeclared co-signer must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn cs1_declared_cosigner_is_accepted() {
+        // The issuer names the permitted key, so the co-signature is endorsed.
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (other_sk, other_pk) = secp256k1::generate_keypair();
+
+        let (mut tx, _) = make_signed_tx(&sk, &pk);
+        tx.declared_cosigners = vec![NoblePublicKey::Secp256k1(other_pk)];
+        // Re-sign the issuer: declared_cosigners is inside the signing payload.
+        let issuer = NoblePrivateKey::Secp256k1(sk);
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        tx.issuer_sig = issuer.sign(&msg).unwrap();
+
+        let other = NoblePrivateKey::Secp256k1(other_sk);
+        tx.additional_sigs.push(other.sign(&msg).unwrap());
+
+        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
+        validate_transaction(&tx, &tx_id, &default_tx_ctx())
+            .expect("a declared co-signer must be accepted");
+    }
+
+    #[test]
+    fn cs1_empty_declaration_forbids_all_cosignatures() {
+        // The default. A transaction that declares nobody carries nobody.
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (tx, _) = make_signed_tx(&sk, &pk);
+        assert!(tx.declared_cosigners.is_empty());
+        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
+        validate_transaction(&tx, &tx_id, &default_tx_ctx())
+            .expect("no co-signatures at all is valid");
+    }
+
+    #[test]
+    fn h1_bip137_signature_cannot_be_replayed_on_altered_inputs() {
+        // The attack H1 closes. The old message named only a few fields and
+        // said nothing about inputs, so a signature could be lifted onto a
+        // transaction that spent MORE of the signer's own UTXOs — the surplus
+        // silently becoming fee. Input-ownership validation cannot catch it,
+        // because those inputs really are the signer's.
+        let (mut tx, _) = make_bip137_notarization_tx();
+
+        // Same signature, one extra input the signer also owns.
+        tx.inputs.push(TxIn {
+            prev_output: OutPoint { txid: Hash256::from_bytes([0x22; 32]), vout: 1 },
+        });
+        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
+
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(
+            matches!(result, Err(ValidationError::IssuerSigInvalid(_))),
+            "adding an input must invalidate the BIP-137 signature, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn h1_bip137_signature_is_bound_to_its_chain() {
+        // The chain id is inside the signed payload digest, so the same signed
+        // transaction cannot be replayed onto a different chain.
+        let (tx, tx_id) = make_bip137_notarization_tx();
+        let mut other_chain = default_tx_ctx();
+        other_chain.chain_id ^= 0xFFFF_FFFF;
+        assert!(
+            validate_transaction(&tx, &tx_id, &other_chain).is_err(),
+            "a BIP-137 signature must not verify against a different chain id"
+        );
     }
 
     #[test]
@@ -2189,6 +2197,7 @@ mod tests {
                 signature: vec![0u8; 32], // Wrong length
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2230,6 +2239,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2272,6 +2282,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2317,6 +2328,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2449,6 +2461,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2503,6 +2516,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],

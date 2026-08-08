@@ -238,14 +238,27 @@ mod tests {
     /// inner codec — and we'd need a custom wrapper.
     #[test]
     fn req_resp_size_cap_within_project_limit() {
-        // The project's expected cap.
-        assert_eq!(crate::codec::MAX_REQUEST_RESPONSE_BYTES, 8 * 1024 * 1024);
-        // Block-sized responses must fit within libp2p's RESPONSE cap (10 MiB).
-        // MAX_BLOCK_SIZE is 8 MiB; with CBOR overhead a serialized block stays
-        // well under 10 MiB. If MAX_BLOCK_SIZE ever grows above ~10 MiB, this
-        // assumption breaks — sync would fail with libp2p decode errors before
-        // any honest block could be transferred.
-        assert!(noble_core::MAX_BLOCK_SIZE <= crate::codec::MAX_REQUEST_RESPONSE_BYTES);
+        // L24: the project cap is DERIVED — a maximal block plus its envelope —
+        // so asserting a hand-written byte count here would just re-introduce
+        // the drift this fixed. Assert the relationship instead.
+        assert_eq!(
+            crate::codec::MAX_REQUEST_RESPONSE_BYTES,
+            noble_core::MAX_BLOCK_SIZE + crate::codec::MAX_SYNC_ENVELOPE_BYTES
+        );
+        // A maximal block must fit with room left for its framing. Strict `<`
+        // is the point: the constant used to EQUAL MAX_BLOCK_SIZE, leaving a
+        // block at the limit no budget for its own envelope.
+        assert!(
+            noble_core::MAX_BLOCK_SIZE < crate::codec::MAX_REQUEST_RESPONSE_BYTES,
+            "a block at the size limit must still leave envelope headroom"
+        );
+        // And the whole thing must stay under libp2p's RESPONSE cap (10 MiB),
+        // which is the limit actually enforced at decode time — otherwise sync
+        // fails with libp2p decode errors before any honest block transfers.
+        assert!(
+            crate::codec::MAX_REQUEST_RESPONSE_BYTES < 10 * 1024 * 1024,
+            "project cap must stay below libp2p's RESPONSE_SIZE_MAXIMUM"
+        );
     }
 
     #[test]

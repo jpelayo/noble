@@ -76,10 +76,32 @@ impl NetworkHandle {
 /// Start the network service. Returns a [`NetworkHandle`] for the node to interact with.
 ///
 /// This spawns a tokio task that runs the libp2p swarm event loop.
+/// L3: cap on tracked outbound block requests.
+///
+/// Reaching it refuses a NEW request rather than evicting an existing binding —
+/// evicting one silently disabled the expected-hash check for its response.
+const MAX_PENDING_BLOCK_REQUESTS: usize = 1024;
+
 pub async fn start_network(
     config: NetworkConfig,
     block_provider: Arc<dyn BlockProvider>,
     tx_provider: Arc<dyn TxProvider>,
+) -> Result<NetworkHandle, NetworkError> {
+    start_network_with_bans(config, block_provider, tx_provider, Vec::new()).await
+}
+
+/// As [`start_network`], seeding the peer manager with persisted bans (H4).
+///
+/// Bans were written to storage but never read back, so every restart wiped the
+/// node's memory of who it had excluded and it cheerfully re-dialled them. The
+/// seed has to happen HERE, before the event loop starts dialling cached peers —
+/// handing it in after startup would leave a window in which banned peers are
+/// contacted anyway.
+pub async fn start_network_with_bans(
+    config: NetworkConfig,
+    block_provider: Arc<dyn BlockProvider>,
+    tx_provider: Arc<dyn TxProvider>,
+    persisted_bans: Vec<(Vec<u8>, u64, u8, Option<[u8; 32]>)>,
 ) -> Result<NetworkHandle, NetworkError> {
     // Load or generate the P2P identity keypair.
     // Priority: pre-loaded from unified keystore > file on disk > generate new.
@@ -329,17 +351,59 @@ pub async fn start_network(
     let (command_tx, command_rx) = mpsc::channel(CHANNEL_BUFFER);
     let (event_tx, event_rx) = mpsc::channel(CHANNEL_BUFFER);
 
-    let peer_manager = PeerManager::new(&config);
+    let mut peer_manager = PeerManager::new(&config);
+    if !persisted_bans.is_empty() {
+        let count = persisted_bans.len();
+        peer_manager.load_persisted_bans(persisted_bans);
+        tracing::info!(
+            task = "network_startup",
+            "restored {count} persisted peer exclusion(s) before dialling"
+        );
+    }
 
-    tokio::spawn(run_event_loop(
-        swarm,
-        config,
-        peer_manager,
-        block_provider,
-        tx_provider,
-        command_rx,
-        event_tx,
-    ));
+    // C3 (second half): supervise the event loop rather than spawning it
+    // fire-and-forget. Dropping the JoinHandle meant that if the loop ever
+    // returned — or panicked, which a malformed CBOR length could once cause
+    // from any peer — the process kept running with no peer traffic and no
+    // signal at all. The supervisor observes completion, logs it at error
+    // level, and emits a terminal event so the node can react instead of
+    // quietly serving nothing.
+    let supervisor_event_tx = event_tx.clone();
+    tokio::spawn(async move {
+        let loop_handle = tokio::spawn(run_event_loop(
+            swarm,
+            config,
+            peer_manager,
+            block_provider,
+            tx_provider,
+            command_rx,
+            event_tx,
+        ));
+
+        let reason = match loop_handle.await {
+            Ok(()) => "event loop returned unexpectedly".to_string(),
+            Err(e) if e.is_panic() => "event loop panicked".to_string(),
+            Err(e) if e.is_cancelled() => "event loop was cancelled".to_string(),
+            Err(e) => format!("event loop join error: {e}"),
+        };
+
+        tracing::error!(
+            task = "network_supervisor",
+            "NETWORK EVENT LOOP STOPPED: {reason} — this node has no peer connectivity"
+        );
+
+        // Best-effort: if the receiver is already gone the node is shutting
+        // down anyway, which is the one case where this is not news.
+        if let Err(e) = supervisor_event_tx
+            .send(NetworkEvent::ServiceTerminated { reason })
+            .await
+        {
+            tracing::debug!(
+                task = "network_supervisor",
+                "could not deliver ServiceTerminated (node already shutting down): {e}"
+            );
+        }
+    });
 
     Ok(NetworkHandle {
         command_tx,
@@ -1030,6 +1094,12 @@ async fn handle_swarm_event(
             if num_established == 0 {
                 let was_tracked = peer_manager.on_disconnected(&peer_id);
                 ingress_budget.remove_peer(&peer_id);
+                // L4: the SERVING budget was never cleaned up on disconnect.
+                // It self-caps via evict_oldest, so it did not grow without
+                // bound — but a reconnecting peer inherited whatever budget its
+                // previous session had already spent, which is neither a
+                // penalty we intended nor a bound we can reason about.
+                serving_budget.remove_peer(&peer_id);
                 // Resolve disconnect reason: explicit reason (chain mismatch, ban)
                 // takes priority over the libp2p cause.
                 let explicit_reason = disconnect_reasons.remove(&peer_id);
@@ -1577,20 +1647,48 @@ async fn handle_swarm_event(
                     }
                 }
                 SyncResponse::Block { block: Some(block), vote_data } => {
-                    // Cache for serving to other peers.
-                    // Evict stale same-validator entries (see SyncResponse::Blocks).
                     let bh_bytes_opt: Option<[u8; 32]> = block
                         .header
                         .compute_block_hash()
                         .ok()
                         .map(|h| *h.as_bytes());
-                    if let Some(bh_bytes) = bh_bytes_opt {
-                        let validator_wire = block.header.validator_id.to_wire_bytes();
-                        pending_proposals.retain(|_, (b, _)| {
-                            b.header.validator_id.to_wire_bytes() != validator_wire
-                        });
-                        pending_proposals
-                            .insert(bh_bytes, (block.clone(), now_cache_ts));
+
+                    // H7: bind the singular response to what we actually asked
+                    // for. The plural `Blocks` arm checks membership in the
+                    // request's expected-hash set; this arm checked NOTHING —
+                    // so any peer could answer with any block and have it
+                    // cached AND evict a legitimate same-validator candidate
+                    // from `pending_proposals`, purely by responding.
+                    //
+                    // `GetBlockByHeight` cannot hash-bind (we do not know the
+                    // hash in advance), so when there is no recorded expectation
+                    // the block is still forwarded to the node — which validates
+                    // it — but it is NOT cached and evicts nothing. Caching is
+                    // the part that must be earned.
+                    let solicited = match (expected_hashes.as_ref(), bh_bytes_opt) {
+                        (Some(expected), Some(bh)) => expected.contains(&bh),
+                        // No expectation recorded for this request id.
+                        (None, _) => false,
+                        (Some(_), None) => false,
+                    };
+
+                    if !solicited {
+                        tracing::debug!(
+                            task = "sync_response",
+                            "peer {peer} sent an unsolicited/unbindable single block — \
+                             forwarding for validation but not caching or evicting"
+                        );
+                    }
+
+                    if solicited {
+                        if let Some(bh_bytes) = bh_bytes_opt {
+                            let validator_wire = block.header.validator_id.to_wire_bytes();
+                            pending_proposals.retain(|_, (b, _)| {
+                                b.header.validator_id.to_wire_bytes() != validator_wire
+                            });
+                            pending_proposals
+                                .insert(bh_bytes, (block.clone(), now_cache_ts));
+                        }
                     }
                     // Audit follow-up: order swap (same as Blocks arm above).
                     match event_tx.try_send(NetworkEvent::BlockReceived {
@@ -1700,7 +1798,23 @@ async fn handle_swarm_event(
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs();
-                            let offset_ms = (sender_timestamp as i64 - local_now as i64) * 1000;
+                            // L1: checked arithmetic. Timestamps are peer-supplied, and the
+                            // seconds→millis multiply is where an absurd value would
+                            // wrap. A nonsensical offset is discarded rather than fed
+                            // into the median that drives clock-drift suppression.
+                            let offset_ms = match (sender_timestamp as i64)
+                                .checked_sub(local_now as i64)
+                                .and_then(|d| d.checked_mul(1000))
+                            {
+                                Some(v) => v,
+                                None => {
+                                    tracing::debug!(
+                                        task = "clock_offset",
+                                        "ignoring implausible peer timestamp {sender_timestamp}"
+                                    );
+                                    0
+                                }
+                            };
                             peer_manager.update_clock_offset(&peer, offset_ms);
                         }
                         if event_tx.try_send(NetworkEvent::PeerChainTipUpdated {
@@ -2143,10 +2257,22 @@ fn handle_block_announce(
     let request_id = swarm.behaviour_mut().sync_rpc.send_request(source, request);
     // Audit follow-up: bind the request_id to the requested hash set so
     // the response handler can reject unrequested blocks.
-    if pending_block_requests.len() >= 1024 {
-        pending_block_requests.pop_front();
+    // L3: do NOT evict a live request to make room.
+    //
+    // Dropping the oldest entry discarded its expected-hash binding, so when
+    // that response arrived the membership check was silently skipped and any
+    // block the peer felt like sending was accepted. Saturation must cost us a
+    // request, never a validation: refuse to track a new one instead. Entries
+    // are removed as responses arrive, so the table drains on its own.
+    if pending_block_requests.len() >= MAX_PENDING_BLOCK_REQUESTS {
+        tracing::warn!(
+            task = "sync",
+            "pending block-request table full ({MAX_PENDING_BLOCK_REQUESTS}) — \
+             not tracking this request rather than dropping an existing binding"
+        );
+    } else {
+        pending_block_requests.push_back((request_id, vec![block_hash]));
     }
-    pending_block_requests.push_back((request_id, vec![block_hash]));
     Some(NetworkEvent::BlockAnnounced {
         peer_id: peer_bytes,
         hash: block_hash,
@@ -2270,10 +2396,43 @@ fn handle_por_vote(
         return None;
     }
     use noble_codec::NobleCbor;
-    if noble_crypto::SignatureEnvelope::from_cbor(&signature).is_err() {
+    let envelope = match noble_crypto::SignatureEnvelope::from_cbor(&signature) {
+        Ok(e) => e,
+        Err(_) => {
+            tracing::debug!(
+                task = "gossip_vote",
+                "rejected vote with un-decodable signature envelope"
+            );
+            return None;
+        }
+    };
+
+    // M1: verify the vote signature BEFORE accepting it for propagation.
+    //
+    // Returning `Some` here makes the caller answer gossipsub with
+    // `MessageAcceptance::Accept`, which re-publishes the message to our mesh.
+    // Verification used to happen only later, at the consensus layer — so this
+    // node would relay unverified votes on to its peers, amplifying garbage
+    // across the network on the attacker's behalf and spending every
+    // downstream peer's ingress budget before anyone checked a signature.
+    // The vote payload is self-contained (cycle, candidate, round), so it can
+    // be checked right here.
+    let voter_key = match noble_crypto::NoblePublicKey::from_wire_bytes(&voter_id) {
+        Ok(k) => k,
+        Err(_) => return None, // already checked above; belt and braces
+    };
+    let msg = noble_crypto::sha256(&noble_core::wire::v1::vote_signing_payload_bytes(
+        cycle,
+        &noble_crypto::Hash256::from_bytes(candidate_hash),
+        round,
+    ))
+    .0;
+    if voter_key.verify(&msg, &envelope).is_err() {
         tracing::debug!(
             task = "gossip_vote",
-            "rejected vote with un-decodable signature envelope"
+            cycle,
+            round,
+            "rejected vote with an invalid signature — not propagated"
         );
         return None;
     }
@@ -2386,7 +2545,13 @@ fn handle_gossip_node_announce(
             // Previously, peer_manager.update_chain_tip + PeerChainTipUpdated
             // fired regardless of announce.chain_id, so cross-chain peers'
             // tips drove our healing logic before the node-layer filter ran.
-            if announce.chain_id != 0 && announce.chain_id != our_chain_id {
+            // H3: `chain_id == 0` is a wildcard only while WE are unconfigured
+            // (our own chain id is still 0, i.e. pre-genesis). Once this node
+            // has a chain, a zero chain id no longer buys a pass — otherwise
+            // any peer could bypass the cross-chain filter by announcing 0 and
+            // drive our healing logic with a foreign chain's tips.
+            let wildcard_allowed = our_chain_id == 0;
+            if !(wildcard_allowed && announce.chain_id == 0) && announce.chain_id != our_chain_id {
                 tracing::debug!(
                     task = "node_announce",
                     %source,
@@ -2403,7 +2568,21 @@ fn handle_gossip_node_announce(
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                let offset_ms = (announce.timestamp as i64 - local_now as i64) * 1000;
+                // L1: checked — see the sync-status path above.
+                let offset_ms = match (announce.timestamp as i64)
+                    .checked_sub(local_now as i64)
+                    .and_then(|d| d.checked_mul(1000))
+                {
+                    Some(v) => v,
+                    None => {
+                        tracing::debug!(
+                            task = "clock_offset",
+                            "ignoring implausible announce timestamp {}",
+                            announce.timestamp
+                        );
+                        0
+                    }
+                };
                 peer_manager.update_clock_offset(source, offset_ms);
             }
 
@@ -2459,6 +2638,17 @@ fn emit_misbehavior_event(
     reason: &str,
     event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
 ) {
+    emit_misbehavior_event_with_duration(outcome, peer_id, reason, None, event_tx)
+}
+
+/// As [`emit_misbehavior_event`], carrying an operator-requested ban duration.
+fn emit_misbehavior_event_with_duration(
+    outcome: &MisbehaviorOutcome,
+    peer_id: &PeerId,
+    reason: &str,
+    duration_secs: Option<u64>,
+    event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
+) {
     let peer_bytes = peer_id.to_bytes().to_vec();
     match outcome {
         MisbehaviorOutcome::Banned { category, evidence_hash } => {
@@ -2467,6 +2657,7 @@ fn emit_misbehavior_event(
                 reason: reason.to_string(),
                 category: *category,
                 evidence_hash: *evidence_hash,
+                duration_secs,
             }) {
                 tracing::debug!(task = "peer_management", "event channel full: {e}");
             }
@@ -2675,12 +2866,19 @@ fn handle_sync_request(
             if let Some(start_header) = block_provider.get_block_header(start_hash) {
                 let mut height = start_header.height + 1;
                 for _ in 0..limit {
-                    if let Some(block) = block_provider.get_block_by_height(height) {
-                        headers.push(block.header);
-                        height += 1;
-                    } else {
+                    // H6: fetch the HEADER, not the whole block. Serving up to
+                    // 2000 headers used to deserialize 2000 full blocks —
+                    // megabytes of transaction data read and thrown away, on
+                    // the peer event task, for a request any peer can make.
+                    // The hash→header path costs two small reads instead.
+                    let Some(hash) = block_provider.get_block_hash_by_height(height) else {
                         break;
-                    }
+                    };
+                    let Some(header) = block_provider.get_block_header(&hash) else {
+                        break;
+                    };
+                    headers.push(header);
+                    height += 1;
                 }
             }
 
@@ -3135,14 +3333,21 @@ async fn handle_command(
             }
         }
 
-        NetworkCommand::ManualBanPeer { peer_id, reason, duration_secs: _ } => {
+        NetworkCommand::ManualBanPeer { peer_id, reason, duration_secs } => {
             if let Ok(pid) = PeerId::from_bytes(&peer_id) {
                 let reason_clone = reason.clone();
                 let outcome = peer_manager.record_misbehavior(
                     &pid,
                     BanReason::new(BanCategory::ManualBan, reason),
                 );
-                emit_misbehavior_event(&outcome, &pid, &reason_clone, &event_tx);
+                // L2: honour the operator's requested duration instead of
+                // silently substituting the 24h default. Clamped to a sane
+                // range so a typo cannot ban for a century or for one second.
+                const MIN_MANUAL_BAN_SECS: u64 = 60;
+                const MAX_MANUAL_BAN_SECS: u64 = 365 * 24 * 60 * 60;
+                let requested = (duration_secs > 0)
+                    .then(|| duration_secs.clamp(MIN_MANUAL_BAN_SECS, MAX_MANUAL_BAN_SECS));
+                emit_misbehavior_event_with_duration(&outcome, &pid, &reason_clone, requested, &event_tx);
                 disconnect_reasons.insert(pid, format!("manual ban: {reason_clone}"));
                 let _ = swarm.disconnect_peer_id(pid);
             }
@@ -3493,6 +3698,64 @@ fn convert_and_validate_announce(
 
 #[cfg(test)]
 mod tests {
+    // --- M1: votes must be verified BEFORE gossip re-propagation ---
+
+    #[test]
+    fn forged_vote_signature_is_not_propagated() {
+        // Returning Some() here makes the caller answer gossipsub with Accept,
+        // which re-publishes to our mesh. Verifying only at the consensus layer
+        // meant this node relayed unverified votes onward, amplifying garbage
+        // across the network on the attacker's behalf.
+        use noble_codec::NobleCbor;
+        let (sk, pk) = noble_crypto::secp256k1::generate_keypair();
+        let voter = noble_crypto::NoblePublicKey::Secp256k1(pk);
+        let cycle = 7u64;
+        let candidate = [0x33u8; 32];
+        let round = 1u8;
+
+        let msg = noble_crypto::sha256(&noble_core::wire::v1::vote_signing_payload_bytes(
+            cycle,
+            &noble_crypto::Hash256::from_bytes(candidate),
+            round,
+        ))
+        .0;
+        let signer = noble_crypto::NoblePrivateKey::Secp256k1(sk);
+        use noble_crypto::NobleSigner;
+        let good = signer.sign(&msg).unwrap();
+
+        let mut seen = SeenCache::new(std::time::Duration::from_secs(60), 100);
+
+        // A genuine vote is accepted for propagation.
+        assert!(
+            handle_por_vote(
+                b"peer".to_vec(), cycle, candidate, voter.to_wire_bytes(),
+                good.to_cbor().unwrap(), round, &mut seen,
+            ).is_some(),
+            "a correctly signed vote must still propagate"
+        );
+
+        // Same vote with a corrupted signature must NOT propagate.
+        let mut forged = good.clone();
+        forged.signature[0] ^= 0xFF;
+        assert!(
+            handle_por_vote(
+                b"peer".to_vec(), cycle, candidate, voter.to_wire_bytes(),
+                forged.to_cbor().unwrap(), round, &mut seen,
+            ).is_none(),
+            "a forged signature must be rejected at ingress, not relayed"
+        );
+
+        // A vote whose payload was altered after signing (different candidate)
+        // must also fail — the signature covers cycle/candidate/round.
+        assert!(
+            handle_por_vote(
+                b"peer".to_vec(), cycle, [0x44u8; 32], voter.to_wire_bytes(),
+                good.to_cbor().unwrap(), round, &mut seen,
+            ).is_none(),
+            "a vote re-pointed at another candidate must be rejected"
+        );
+    }
+
     use super::*;
     use crate::traits::{BlockProvider, TxProvider};
     use noble_core::{Block, BlockHeader, Transaction};

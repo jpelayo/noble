@@ -5,9 +5,27 @@
 
 use std::io;
 
-/// Write the current process ID to a file.
+/// Write the current process ID to a file, owner-readable only.
+///
+/// L14: `std::fs::write` follows symlinks and inherits the umask, so a PID file
+/// under a shared directory could be pointed at another file and left
+/// world-readable. Created exclusively (`create_new`) so an existing path is
+/// never followed or clobbered, with mode 0600 on unix.
 pub fn write_pid(path: &str) -> io::Result<()> {
-    std::fs::write(path, std::process::id().to_string())
+    use std::io::Write;
+    // A stale file from a crashed run is expected; remove it only after
+    // confirming it is not a live process's file (callers check `is_running`).
+    let _ = std::fs::remove_file(path);
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(std::process::id().to_string().as_bytes())
 }
 
 /// Read a PID from file. Returns `None` if the file does not exist.

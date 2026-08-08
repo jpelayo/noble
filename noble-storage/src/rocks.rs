@@ -456,6 +456,21 @@ impl RocksDbStorage {
             return Err(StorageError::Database("corrupt undo data: too short".into()));
         }
         let count = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+
+        // L6: validate the declared count BEFORE reserving for it. A corrupt
+        // record can declare ~4.29e9 entries, and `Vec::with_capacity` would
+        // try to reserve that immediately — an OOM abort driven by a stored
+        // length field. Each entry needs at least 36 (outpoint) + 4 (length
+        // prefix) bytes, so the remaining input bounds the honest maximum.
+        const MIN_UNDO_ENTRY_BYTES: usize = 36 + 4;
+        let max_possible = (bytes.len() - 4) / MIN_UNDO_ENTRY_BYTES;
+        if count > max_possible {
+            return Err(StorageError::Database(format!(
+                "corrupt undo data: declares {count} entries but only {max_possible} can fit in {} bytes",
+                bytes.len()
+            )));
+        }
+
         let mut pos = 4;
         let mut result = Vec::with_capacity(count);
         for _ in 0..count {
@@ -833,6 +848,18 @@ impl RocksDbStorage {
     }
 }
 
+/// Read-only UTXO view over RocksDB, used by the shared commit validator.
+///
+/// Wrapping in a newtype keeps [`crate::commit_validation`] unable to reach any
+/// mutating method: preparation must only ever read.
+struct RocksUtxoView<'a>(&'a RocksDbStorage);
+
+impl crate::commit_validation::UtxoReadView for RocksUtxoView<'_> {
+    fn utxo_at(&self, outpoint: &OutPoint) -> Result<Option<UtxoEntry>, StorageError> {
+        self.0.read_utxo(outpoint)
+    }
+}
+
 impl StorageEngine for RocksDbStorage {
     /// Override of the trait default. Delegates to the inherent
     /// [`Self::do_rewrite_catalogs`] so the RPC layer (which calls
@@ -859,6 +886,17 @@ impl StorageEngine for RocksDbStorage {
 
         let height = block.header.height;
         let height_be = height.to_be_bytes();
+
+        // C1/C2: shared stateful validation BEFORE anything is staged.
+        // Input ownership, maturity and value conservation are decided by the
+        // one validator both backends call, so RocksDB and MemoryStorage accept
+        // and reject exactly the same blocks. Running it here — ahead of the
+        // WriteBatch — also means a rejected block never stages a single put.
+        crate::commit_validation::validate_block_economics(
+            &RocksUtxoView(self),
+            block,
+            tx_ids,
+        )?;
 
         // Serialize block
         let block_bytes = block.to_cbor()?;
@@ -2559,6 +2597,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2606,6 +2645,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2651,6 +2691,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],

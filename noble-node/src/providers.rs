@@ -21,12 +21,20 @@ use noble_api::lock_order::{TrackedMutex, TrackedRwLock};
 /// Implements [`BlockProvider`] using an `Arc<RwLock<S>>` storage backend.
 pub struct StorageBlockProvider<S: StorageEngine> {
     storage: Arc<TrackedRwLock<S>>,
+    /// H6: memo for `total_transactions` — (height counted so far, running total).
+    ///
+    /// `GetStatus` is served on the peer event task and is answered for every
+    /// peer every 60s, but the count was recomputed by walking EVERY block and
+    /// reading EVERY header each time: O(chain length) per request, growing
+    /// forever, and free for a peer to trigger. Steady state is now O(1); a new
+    /// block costs only the headers actually added.
+    tx_count_memo: std::sync::Mutex<(u64, u64)>,
 }
 
 impl<S: StorageEngine> StorageBlockProvider<S> {
     /// Create a new block provider wrapping the given storage.
     pub fn new(storage: Arc<TrackedRwLock<S>>) -> Self {
-        Self { storage }
+        Self { storage, tx_count_memo: std::sync::Mutex::new((0, 0)) }
     }
 }
 
@@ -70,14 +78,34 @@ impl<S: StorageEngine + Send + Sync> BlockProvider for StorageBlockProvider<S> {
             Some(t) => t,
             None => return 0,
         };
-        let mut total: u64 = 0;
-        for h in 0..=tip.height {
+
+        let mut memo = match self.tx_count_memo.lock() {
+            Ok(m) => m,
+            // A poisoned memo is a cache problem, not a correctness one — fall
+            // back to the honest full scan rather than propagating a panic.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let (counted_to, mut total) = *memo;
+
+        // Rollback (or first call): the memo describes a chain that no longer
+        // exists, so recount. Correctness first — this is the rare path.
+        let start = if counted_to > tip.height || (counted_to == 0 && total == 0) {
+            total = 0;
+            0
+        } else if counted_to == tip.height {
+            return total; // steady state: nothing new
+        } else {
+            counted_to + 1
+        };
+
+        for h in start..=tip.height {
             if let Ok(hash) = storage.get_block_hash_by_height(h) {
                 if let Ok(header) = storage.get_block_header(&hash) {
                     total += header.tx_count as u64;
                 }
             }
         }
+        *memo = (tip.height, total);
         total
     }
 

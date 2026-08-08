@@ -20,4 +20,14 @@ pub enum CodecError {
     /// Failed to produce canonical CBOR encoding.
     #[error("canonical encoding failed: {0}")]
     Canonicalization(String),
+
+    /// A declared CBOR length cannot be represented on this platform, or
+    /// advancing the cursor by it would overflow.
+    ///
+    /// CBOR arguments are `u64` and fully attacker-controlled, so a malformed
+    /// message can declare a length near `u64::MAX`. Reaching this error means
+    /// the decoder refused it as data; previously the arithmetic overflowed and
+    /// panicked, taking down the task doing the decoding.
+    #[error("declared length {declared} is not representable at position {pos}")]
+    LengthOverflow { declared: u64, pos: usize },
 }

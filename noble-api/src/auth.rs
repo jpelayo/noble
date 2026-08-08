@@ -65,7 +65,24 @@ impl TotpValidator {
     /// and compares against the provided hash using constant-time comparison.
     /// All three time steps are always checked (no early return) to prevent
     /// timing side-channel attacks.
+    /// L15: validate WITHOUT recording the code as used.
+    ///
+    /// The reuse tracker is what makes a TOTP code single-use, and the auth
+    /// middleware consumes the code on the way in. `rotateTotpSecret` then
+    /// validated the SAME code again and was rejected as a replay — rotation
+    /// simply could not succeed for a direct Bearer caller. (GUI-proxied calls
+    /// bypass middleware TOTP, so the bug only bit CLI/script clients, which is
+    /// why it survived.) A handler re-checking a code the middleware already
+    /// verified wants this, not `validate_hash`.
+    pub fn validate_hash_no_consume(&self, hash_hex: &str) -> bool {
+        self.validate_hash_inner(hash_hex, false)
+    }
+
     pub fn validate_hash(&self, hash_hex: &str) -> bool {
+        self.validate_hash_inner(hash_hex, true)
+    }
+
+    fn validate_hash_inner(&self, hash_hex: &str, consume: bool) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -106,14 +123,29 @@ impl TotpValidator {
 
         // AUD2-H1: Reject codes already used within the window (replay prevention)
         if matched != 0 {
+            // L15: a non-consuming check confirms validity without touching the
+            // replay tracker, so a handler can re-verify a code the middleware
+            // already accepted.
+            if !consume {
+                return true;
+            }
             if let Some(code) = matched_code {
                 let mut used = self.used_codes.lock();
                 // Drain expired entries (older than 180 seconds).
                 // Window covers the full ±1 TOTP time-step acceptance range (90s)
                 // plus a safety margin to close the microsecond boundary edge case.
-                let cutoff = Instant::now() - std::time::Duration::from_secs(180);
-                while used.front().is_some_and(|(_, t)| *t < cutoff) {
-                    used.pop_front();
+                // L17: `Instant - Duration` PANICS on underflow. On a host with
+                // less than 180s of monotonic uptime — a node started at boot,
+                // with an operator logging in promptly — this aborted the
+                // process on the first accepted TOTP code. When the window
+                // cannot be represented yet, nothing is old enough to drain, so
+                // simply keep every entry.
+                if let Some(cutoff) =
+                    Instant::now().checked_sub(std::time::Duration::from_secs(180))
+                {
+                    while used.front().is_some_and(|(_, t)| *t < cutoff) {
+                        used.pop_front();
+                    }
                 }
                 // Check if this code was already used
                 if used.iter().any(|(c, _)| c == &code) {

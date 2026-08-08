@@ -2110,6 +2110,7 @@ mod tests {
                 signature: vec![0u8; 64],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],

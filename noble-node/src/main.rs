@@ -54,6 +54,9 @@ enum Commands {
         #[arg(long)]
         memory: bool,
         /// Write PID to this file for stop/restart
+        // L14: a RELATIVE default resolved against the process CWD, so `stop`
+        // run from another directory silently missed the file (or found an
+        // unrelated one). Callers resolve this against the data directory.
         #[arg(long, default_value = "noble.pid")]
         pid_file: String,
         /// Run in background (daemonize)
@@ -63,6 +66,9 @@ enum Commands {
     /// Stop a running node
     Stop {
         /// PID file path
+        // L14: a RELATIVE default resolved against the process CWD, so `stop`
+        // run from another directory silently missed the file (or found an
+        // unrelated one). Callers resolve this against the data directory.
         #[arg(long, default_value = "noble.pid")]
         pid_file: String,
     },
@@ -72,6 +78,9 @@ enum Commands {
         #[arg(default_value_t = default_config())]
         config: String,
         /// PID file path
+        // L14: a RELATIVE default resolved against the process CWD, so `stop`
+        // run from another directory silently missed the file (or found an
+        // unrelated one). Callers resolve this against the data directory.
         #[arg(long, default_value = "noble.pid")]
         pid_file: String,
         /// Use in-memory storage instead of RocksDB
@@ -84,6 +93,9 @@ enum Commands {
         #[arg(long, default_value = "https://127.0.0.1:8783")]
         rpc: String,
         /// PID file to check process state
+        // L14: a RELATIVE default resolved against the process CWD, so `stop`
+        // run from another directory silently missed the file (or found an
+        // unrelated one). Callers resolve this against the data directory.
         #[arg(long, default_value = "noble.pid")]
         pid_file: String,
         /// TOTP code (if auth enabled)
@@ -314,7 +326,16 @@ fn generate_bootstrap_config(config_path: &str) -> Result<(), Box<dyn std::error
         }
     }
 
+    // L18: same file, headless path — owner-only, it can hold pkcs12_password.
     std::fs::write(config_path, toml_str)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            config_path,
+            std::fs::Permissions::from_mode(0o600),
+        );
+    }
     Ok(())
 }
 

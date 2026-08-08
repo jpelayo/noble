@@ -49,6 +49,15 @@ pub enum StorageError {
     #[error("balance overflow: current {current}, credit {amount}")]
     BalanceOverflow { current: u64, amount: u64 },
 
+    /// C1/C2: a transaction failed shared stateful validation during commit
+    /// (input ownership, maturity, or value conservation). Carries the typed
+    /// cause so callers never parse message text to classify the failure.
+    #[error("tx {tx_index} failed stateful validation: {reason}")]
+    InvalidTransaction {
+        tx_index: usize,
+        reason: noble_core::error::ValidationError,
+    },
+
     /// Corruption detected at a specific height.
     #[error("corruption detected at height {height}: {detail}")]
     CorruptionDetected { height: u64, detail: String },

@@ -55,15 +55,36 @@ impl<'de> CborDeserializer<'de> {
     }
 
     fn read_bytes(&mut self, n: usize) -> Result<&'de [u8], CodecError> {
-        if self.pos + n > self.input.len() {
+        // `n` derives from an attacker-controlled CBOR argument, so the cursor
+        // arithmetic must be total: `self.pos + n` used to be unchecked, which
+        // overflowed on a declared length near usize::MAX — panicking the task
+        // doing the decode instead of returning a codec error.
+        let end = self.pos.checked_add(n).ok_or(CodecError::LengthOverflow {
+            declared: n as u64,
+            pos: self.pos,
+        })?;
+        if end > self.input.len() {
             return Err(CodecError::Deserialization(format!(
                 "need {} bytes at pos {}, have {}",
                 n, self.pos, self.input.len() - self.pos
             )));
         }
-        let slice = &self.input[self.pos..self.pos + n];
-        self.pos += n;
+        let slice = &self.input[self.pos..end];
+        self.pos = end;
         Ok(slice)
+    }
+
+    /// Convert a declared CBOR length to `usize`, refusing anything that does
+    /// not fit on this platform.
+    ///
+    /// A bare `arg as usize` truncates on 32-bit targets, which would turn an
+    /// absurd declared length into a small, *plausible* one — silently
+    /// accepting a malformed message. Failing closed is the only safe choice.
+    fn checked_len(&self, arg: u64) -> Result<usize, CodecError> {
+        usize::try_from(arg).map_err(|_| CodecError::LengthOverflow {
+            declared: arg,
+            pos: self.pos,
+        })
     }
 
     /// Read the CBOR argument (additional info value) from the initial byte.
@@ -247,7 +268,8 @@ impl<'a, 'de> de::Deserializer<'de> for &'a mut CborDeserializer<'de> {
     fn deserialize_str<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, CodecError> {
         let (major, len) = self.read_header()?;
         if major != 3 { return Err(CodecError::Deserialization(format!("expected text, got major {major}"))); }
-        let bytes = self.read_bytes(len as usize)?;
+        let n = self.checked_len(len)?;
+        let bytes = self.read_bytes(n)?;
         let s = std::str::from_utf8(bytes)
             .map_err(|e| CodecError::Deserialization(format!("invalid utf8: {e}")))?;
         visitor.visit_borrowed_str(s)
@@ -260,7 +282,8 @@ impl<'a, 'de> de::Deserializer<'de> for &'a mut CborDeserializer<'de> {
     fn deserialize_bytes<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, CodecError> {
         let (major, len) = self.read_header()?;
         if major != 2 { return Err(CodecError::Deserialization(format!("expected bytes, got major {major}"))); }
-        let bytes = self.read_bytes(len as usize)?;
+        let n = self.checked_len(len)?;
+        let bytes = self.read_bytes(n)?;
         visitor.visit_borrowed_bytes(bytes)
     }
 
@@ -308,7 +331,8 @@ impl<'a, 'de> de::Deserializer<'de> for &'a mut CborDeserializer<'de> {
             if self.depth > MAX_CBOR_DEPTH {
                 return Err(CodecError::Deserialization("max CBOR nesting depth exceeded".into()));
             }
-            let r = visitor.visit_seq(SeqAccess { de: &mut *self, remaining: len as usize });
+            let remaining = self.checked_len(len)?;
+            let r = visitor.visit_seq(SeqAccess { de: &mut *self, remaining });
             self.depth -= 1;
             r
         } else if major == 2 {
@@ -317,7 +341,8 @@ impl<'a, 'de> de::Deserializer<'de> for &'a mut CborDeserializer<'de> {
             // (the natural CBOR representation for binary data), not just from
             // arrays of integers. Clients encode binary data as byte strings;
             // serde expects sequences. This bridge makes both representations work.
-            let bytes = self.read_bytes(len as usize)?;
+            let n = self.checked_len(len)?;
+        let bytes = self.read_bytes(n)?;
             visitor.visit_seq(ByteSeqAccess { bytes, pos: 0 })
         } else {
             Err(CodecError::Deserialization(format!("expected array or byte string, got major {major}")))
@@ -343,7 +368,8 @@ impl<'a, 'de> de::Deserializer<'de> for &'a mut CborDeserializer<'de> {
         if self.depth > MAX_CBOR_DEPTH {
             return Err(CodecError::Deserialization("max CBOR nesting depth exceeded".into()));
         }
-        let r = visitor.visit_map(MapAccess { de: &mut *self, remaining: len as usize });
+        let remaining = self.checked_len(len)?;
+        let r = visitor.visit_map(MapAccess { de: &mut *self, remaining });
         self.depth -= 1;
         r
     }
@@ -520,6 +546,78 @@ mod depth_tests {
         assert!(r.is_err(), "deeply nested CBOR must be rejected, not overflow");
         let msg = format!("{:?}", r.unwrap_err());
         assert!(msg.contains("depth"), "expected a depth error, got: {msg}");
+    }
+
+    // --- C3: declared-length arithmetic must be total ---
+    //
+    // CBOR arguments are u64 and fully attacker-controlled. Every one of these
+    // inputs previously overflowed `self.pos + n` and PANICKED the task doing
+    // the decode — reachable from any peer, since gossip and sync bodies are
+    // decoded on the network event task.
+
+    /// Build a header for `major` declaring a 64-bit `len`.
+    fn header_u64(major: u8, len: u64) -> Vec<u8> {
+        let mut v = vec![(major << 5) | 27];
+        v.extend_from_slice(&len.to_be_bytes());
+        v
+    }
+
+    #[test]
+    fn byte_string_length_u64_max_errors_without_panicking() {
+        let blob = header_u64(2, u64::MAX); // major 2 = byte string
+        let r = from_cbor::<serde::de::IgnoredAny>(&blob);
+        assert!(r.is_err(), "u64::MAX byte-string length must be rejected");
+    }
+
+    #[test]
+    fn every_length_bearing_major_type_rejects_u64_max() {
+        // 2=bytes, 3=text, 4=array, 5=map — each carries a declared length.
+        for major in [2u8, 3, 4, 5] {
+            let blob = header_u64(major, u64::MAX);
+            let r = from_cbor::<serde::de::IgnoredAny>(&blob);
+            assert!(
+                r.is_err(),
+                "major type {major} with u64::MAX length must error, not panic"
+            );
+        }
+    }
+
+    #[test]
+    fn near_overflow_length_is_rejected() {
+        // Large enough that pos + n overflows usize on a 64-bit target.
+        let blob = header_u64(2, u64::MAX - 8);
+        assert!(from_cbor::<serde::de::IgnoredAny>(&blob).is_err());
+    }
+
+    #[test]
+    fn truncated_payload_reports_eof_not_overflow() {
+        // Declares 32 bytes but supplies 2: a plain, honest short read.
+        let mut blob = vec![(2u8 << 5) | 24, 32];
+        blob.extend_from_slice(&[0xAA, 0xBB]);
+        let err = from_cbor::<serde::de::IgnoredAny>(&blob).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("need 32 bytes"), "expected a short-read error, got: {msg}");
+    }
+
+    #[test]
+    fn oversized_length_inside_nested_structure_is_rejected() {
+        // The bad length sits inside an array, so it is reached through the
+        // recursive path rather than at the top level.
+        let mut blob = vec![0x81]; // array(1)
+        blob.extend_from_slice(&header_u64(2, u64::MAX));
+        assert!(from_cbor::<serde::de::IgnoredAny>(&blob).is_err());
+    }
+
+    #[test]
+    fn valid_payloads_still_decode_after_the_length_hardening() {
+        // The guard must not reject legitimate data.
+        let v: Vec<u8> = vec![1, 2, 3, 4, 5];
+        let bytes = crate::cbor_ser::to_cbor(&v).unwrap();
+        assert_eq!(from_cbor::<Vec<u8>>(&bytes).unwrap(), v);
+
+        let s = "noble".to_string();
+        let bytes = crate::cbor_ser::to_cbor(&s).unwrap();
+        assert_eq!(from_cbor::<String>(&bytes).unwrap(), s);
     }
 
     #[test]

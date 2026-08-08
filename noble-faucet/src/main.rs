@@ -762,6 +762,26 @@ async fn main() {
     let keystore_dir = cli.keystore_dir.unwrap_or_else(|| base_dir.join("faucet-keystore"));
 
     let db = FaucetDb::open(&db_path).expect("Failed to open faucet database");
+
+    // L19: the RPC client accepts ANY TLS certificate (NoCertVerifier). That is
+    // defensible for loopback, where the node presents a self-issued cert and
+    // the connection never leaves the host — but against a REMOTE node it means
+    // no authentication at all, so anything on the path can impersonate the
+    // node and harvest whatever the faucet sends. `run_discharge` already
+    // refused non-loopback; serve mode did not. Fail fast instead of running
+    // unauthenticated.
+    if !is_loopback_rpc(&cli.rpc_url) {
+        eprintln!(
+            "FATAL: faucet serve mode refuses a non-loopback RPC URL ('{}').\n\
+             TLS certificate verification is disabled for the node's self-issued \
+             certificate, which is only safe on loopback. Run the faucet on the \
+             node host, or add an explicit certificate policy before using a \
+             remote RPC endpoint.",
+            cli.rpc_url
+        );
+        std::process::exit(1);
+    }
+
     let rpc = NodeRpcClient::new(&cli.rpc_url, cli.totp_code)
         .expect("Failed to create RPC client (check URL scheme)");
 

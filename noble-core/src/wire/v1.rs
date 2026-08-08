@@ -170,6 +170,9 @@ impl WireFormat for Transaction {
     fn encode_wire(&self, buf: &mut Vec<u8>) {
         let mut field_count: usize = 9;
         if self.contract_data.is_some() { field_count += 1; }
+        // CS1: omitted when empty, so transactions that declare no co-signers
+        // encode exactly as before (the frozen vectors are unaffected).
+        if !self.declared_cosigners.is_empty() { field_count += 1; }
         if self.encrypted_locator.is_some() { field_count += 1; }
         if self.expires_at.is_some() { field_count += 1; }
         if !self.external_attestations.is_empty() { field_count += 1; }
@@ -190,6 +193,15 @@ impl WireFormat for Transaction {
         if let Some(ref data) = self.contract_data {
             cbor::write_text(buf, "contract_data");
             cbor::write_bytes(buf, data);
+        }
+
+        // "declared_cosigners" — omitted when empty (CS1)
+        if !self.declared_cosigners.is_empty() {
+            cbor::write_text(buf, "declared_cosigners");
+            cbor::write_array(buf, self.declared_cosigners.len());
+            for pk in &self.declared_cosigners {
+                cbor::write_bytes(buf, &pk.to_wire_bytes());
+            }
         }
 
         // "encrypted_locator" — omitted when None
@@ -289,6 +301,9 @@ impl WireFormat for BlockHeader {
 pub fn tx_signing_payload_bytes(tx: &Transaction, chain_id: u32) -> Vec<u8> {
     let mut field_count: usize = 8;
     if tx.contract_data.is_some() { field_count += 1; }
+    // CS1: the issuer SIGNS the permitted co-signer set, which is what makes
+    // the signer list trustworthy. Omitted when empty (vectors unaffected).
+    if !tx.declared_cosigners.is_empty() { field_count += 1; }
     if tx.encrypted_locator.is_some() { field_count += 1; }
     if tx.expires_at.is_some() { field_count += 1; }
     if !tx.external_attestations.is_empty() { field_count += 1; }
@@ -306,6 +321,14 @@ pub fn tx_signing_payload_bytes(tx: &Transaction, chain_id: u32) -> Vec<u8> {
     if let Some(ref data) = tx.contract_data {
         cbor::write_text(&mut buf, "contract_data");
         cbor::write_bytes(&mut buf, data);
+    }
+
+    if !tx.declared_cosigners.is_empty() {
+        cbor::write_text(&mut buf, "declared_cosigners");
+        cbor::write_array(&mut buf, tx.declared_cosigners.len());
+        for pk in &tx.declared_cosigners {
+            cbor::write_bytes(&mut buf, &pk.to_wire_bytes());
+        }
     }
 
     if let Some(ref loc) = tx.encrypted_locator {
@@ -333,9 +356,17 @@ pub fn tx_signing_payload_bytes(tx: &Transaction, chain_id: u32) -> Vec<u8> {
     cbor::write_array(&mut buf, tx.inputs.len());
     for inp in &tx.inputs { inp.prev_output.encode_wire(&mut buf); }
 
-    // Sort metadata by key for order-independent signing.
+    // Sort metadata into canonical order (key, then value) before signing.
+    //
+    // The tiebreaker is load-bearing: duplicate keys are legal, so a key-only
+    // comparison is not a total order and the C mirror's `qsort` (unstable)
+    // could order equal-key entries differently from Rust's stable sort —
+    // producing a different signing payload for the same transaction. Since
+    // validation now requires canonical order on the wire (T9b), this sort is
+    // a no-op for any valid transaction and exists only to keep the payload
+    // well-defined for callers signing before canonicalising.
     let mut sorted_metadata: Vec<&crate::metadata::MetadataEntry> = tx.metadata.iter().collect();
-    sorted_metadata.sort_by(|a, b| a.key.cmp(&b.key));
+    sorted_metadata.sort_by(|a, b| crate::metadata::canonical_cmp(a, b));
 
     cbor::write_text(&mut buf, "metadata");
     cbor::write_array(&mut buf, sorted_metadata.len());
@@ -641,6 +672,7 @@ mod tests {
                 signature: vec![0x00; 64],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],

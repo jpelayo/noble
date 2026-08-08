@@ -538,7 +538,25 @@ impl<S: StorageEngine + Send + Sync + 'static> StorageApiServer for Arc<ApiState
         path: String,
         with_hash: bool,
     ) -> Result<ListShardsResponse, ErrorObjectOwned> {
+        // H13: restrict the scan to CONFIGURED storage locations.
+        //
+        // The path came straight from the caller, so this walked (and, with
+        // `with_hash`, read and SHA-256'd) any directory on the host the node
+        // process could reach — arbitrary filesystem enumeration and unbounded
+        // I/O driven entirely by a request parameter. Confining it to the
+        // node's own storage tiers keeps the feature and removes the primitive.
         let p = Path::new(&path);
+        let canonical = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let permitted = self
+            .storage_roots()
+            .into_iter()
+            .any(|root| canonical.starts_with(&root));
+        if !permitted {
+            return Err(ApiError::InvalidParam(format!(
+                "path '{path}' is not a configured storage location"
+            ))
+            .into());
+        }
         let (descriptors, errors) = noble_storage::scan_directory(p, with_hash);
         Ok(ListShardsResponse {
             path,

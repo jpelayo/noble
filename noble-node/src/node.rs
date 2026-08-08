@@ -121,6 +121,13 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// S49: Set to `true` when median clock drift exceeds `CLOCK_DRIFT_CRITICAL_SECS`.
     /// While true, block proposals are suppressed.
     pub clock_drift_paused: std::sync::atomic::AtomicBool,
+    /// L11: set when the startup chain-integrity check FAILS.
+    ///
+    /// Startup used to log the failure and carry on serving and proposing from
+    /// data it had just proven corrupt — publishing that damage to peers. While
+    /// true, block proposals are suppressed; the node still serves reads and
+    /// can sync, so an operator can diagnose it.
+    pub integrity_failed: std::sync::atomic::AtomicBool,
     /// S53: Last proposed block (height, hash) — set when BroadcastBlock passes the gate.
     /// Cleared on chain tip advancement (new cycle). Shared with HealingManager.
     pub last_proposed: Arc<parking_lot::Mutex<Option<(u64, [u8; 32])>>>,
@@ -767,6 +774,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             validator_pubkey_hex: Some(node_pubkey_hex.clone()).filter(|s| !s.is_empty()),
             announce_keypair,
             clock_drift_paused: std::sync::atomic::AtomicBool::new(false),
+            integrity_failed: std::sync::atomic::AtomicBool::new(false),
             validator_list_path: Some(validator_list_path),
             min_fee_rate: Arc::new(std::sync::atomic::AtomicU64::new(config.consensus.min_fee_rate)),
             seed_addrs: config.network.seeds.clone(),
@@ -1352,10 +1360,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             f.height, f.kind, f.detail,
                         );
                     }
+                    // L11: refuse to propose from data we just proved corrupt.
+                    self.integrity_failed
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     self.startup_events.push(serde_json::json!({
                         "event": "integrity_failure",
                         "findings": report.findings.len(),
                         "first_corrupt_height": report.first_corrupt_height,
+                        "proposals_suppressed": true,
                     }));
                 }
             }
@@ -1493,7 +1505,25 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             }
         }
 
-        let mut network = noble_network::start_network(net_config, block_provider, tx_provider)
+        // H4: load persisted exclusions BEFORE the network starts dialling.
+        // They were written to storage but never read back, so each restart
+        // forgot who it had excluded and immediately re-dialled them.
+        let persisted_bans = {
+            let storage = self.storage.read();
+            match storage.load_bans() {
+                Ok(bans) => bans,
+                Err(e) => {
+                    tracing::warn!(
+                        task = "network_startup",
+                        "could not load persisted peer exclusions: {e} — starting with none"
+                    );
+                    Vec::new()
+                }
+            }
+        };
+        let mut network = noble_network::service::start_network_with_bans(
+            net_config, block_provider, tx_provider, persisted_bans,
+        )
             .await
             .map_err(|e| NodeError::Network(e.to_string()))?;
 
@@ -1994,7 +2024,31 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             (section, key),
                             ("network", "seeds") | ("api", "allowed_ips") | ("api", "tls_san") | ("consensus", "voting_subset")
                         );
-                        let toml_value = if existing_is_array || known_array {
+                        // M11: a value that is already valid TOML is parsed as
+                        // TOML, not split on commas.
+                        //
+                        // `setStoragePaths` sends an inline-table array like
+                        // `[{ path = "...", target_gb = 2 }, "..."]`. Splitting
+                        // that on ',' shredded it into meaningless string
+                        // fragments ("[{ path = \"...\"" and so on), producing a
+                        // config file that could not be deserialized into
+                        // `Vec<ExtraDataDir>` at the next startup — the node came
+                        // back up unable to read its own storage layout. Commas
+                        // inside quoted paths had the same effect.
+                        let looks_like_toml_array =
+                            value.trim_start().starts_with('[') && value.trim_end().ends_with(']');
+                        let parsed_array: Option<toml::Value> = if looks_like_toml_array {
+                            // Wrap so the fragment parses as a document.
+                            toml::from_str::<toml::Table>(&format!("v = {value}"))
+                                .ok()
+                                .and_then(|t| t.get("v").cloned())
+                        } else {
+                            None
+                        };
+
+                        let toml_value = if let Some(arr) = parsed_array {
+                            arr
+                        } else if existing_is_array || known_array {
                             if value.is_empty() {
                                 toml::Value::Array(Vec::new())
                             } else {
@@ -2018,6 +2072,18 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
                     let new_contents = toml::to_string_pretty(&doc)
                         .map_err(|e| format!("serialize config: {e}"))?;
+
+                    // M11: prove the file we are about to write can be read back
+                    // as a NodeConfig before replacing the working one. Writing
+                    // first and discovering the problem at next startup is how a
+                    // config edit turns into a node that will not boot.
+                    if let Err(e) = toml::from_str::<crate::config::NodeConfig>(&new_contents) {
+                        return Err(format!(
+                            "refusing to write config: the result would not parse back \
+                             as a valid NodeConfig ({e}) — original file left untouched"
+                        ));
+                    }
+
                     atomic_write_file(&cp, new_contents.as_bytes())
                         .map_err(|e| format!("write config: {e}"))?;
 
@@ -2122,6 +2188,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // --- Build ApiState ---
         let api_state = Arc::new(ApiState {
+            dir_size_cache: parking_lot::Mutex::new(None),
             storage: self.storage.clone(),
             mempool: self.mempool.clone(),
             validator_registry: self.validator_registry.clone(),
@@ -3288,14 +3355,18 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "categories": categories,
                 }));
             }
-            NetworkEvent::PeerBanned { peer_id, reason, category, evidence_hash } => {
+            NetworkEvent::PeerBanned { peer_id, reason, category, evidence_hash, duration_secs } => {
                 // Persist ban to storage.
                 {
                     let now_unix = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    let banned_until = now_unix + 86_400; // 24h default ban duration
+                    // L2: honour an operator-requested duration when the ban
+                    // came from a manual action; automatic bans keep the 24h
+                    // default. The request used to be discarded entirely.
+                    const DEFAULT_BAN_SECS: u64 = 86_400;
+                    let banned_until = now_unix + duration_secs.unwrap_or(DEFAULT_BAN_SECS);
                     let storage = self.storage.read();
                     if let Err(e) = storage.store_ban(&peer_id, banned_until, *category, evidence_hash.as_ref()) {
                         tracing::error!(
@@ -3946,6 +4017,25 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     self.healing.on_sync_request_failed(peer_id, now);
                 }
             }
+            NetworkEvent::ServiceTerminated { reason } => {
+                // Terminal: the network event loop is gone, so this node will
+                // never see another peer, block or vote. Continuing to run in
+                // that state is precisely the silent degradation that made the
+                // 0.138.0 wedge look like a healthy process — ports still
+                // listening, nothing being served. Make it loud and visible
+                // rather than letting the node sit there pretending to work.
+                tracing::error!(
+                    task = "network_supervisor",
+                    "FATAL: network service terminated ({reason}) — no peer connectivity remains; \
+                     the node cannot sync, propose or vote. Restart required."
+                );
+                self.startup_events.push(serde_json::json!({
+                    "event": "network_terminated",
+                    "message": format!(
+                        "FATAL: network service terminated ({reason}) — no peer connectivity; restart required"
+                    ),
+                }));
+            }
             _ => {
                 // Emit protocol activity for VoteReceived before routing to engine
                 if let NetworkEvent::VoteReceived { voter_id, cycle, candidate_hash, round, .. } = event {
@@ -4284,8 +4374,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // (sync import already applied decay with voter_count=1).
                     let tip = self.consensus.read().chain_tip().0;
                     if height > tip || height == tip {
+                        // M7: weight this block by the validators that actually
+                        // witnessed the COMMITTED candidate, not by every voter
+                        // seen during the cycle. `voter_count` is the majority
+                        // denominator — it includes voters who backed losing
+                        // candidates, and (during bootstrap) grows with any key
+                        // observed. Using it credited a chain for support its
+                        // winning block never had, which matters because this
+                        // weight feeds fork comparison.
                         let old = self.healing.chain_vote_weight().load(std::sync::atomic::Ordering::Relaxed);
-                        let new = noble_consensus::decay_vote_weight(old, votes.voter_count as u64);
+                        let witnesses = votes.unique_witness_count as u64;
+                        let new = noble_consensus::decay_vote_weight(old, witnesses);
                         self.healing.chain_vote_weight().store(new, std::sync::atomic::Ordering::Relaxed);
                     }
                     match noble_codec::NobleCbor::to_cbor(&*votes) {
@@ -4464,6 +4563,21 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     };
                     // Recursively process any actions from the proposal
                     self.process_cycle_actions(actions, network_cmd, new_block_tx, cycle_phase_tx, metrics, shared_identity);
+                }
+                CycleIo::BroadcastBlock(ref _block)
+                    if self
+                        .integrity_failed
+                        .load(std::sync::atomic::Ordering::Relaxed) =>
+                {
+                    tracing::error!(
+                        task = "integrity",
+                        "Block proposal suppressed — startup chain-integrity check failed; \
+                         this node must not publish blocks built on corrupt data"
+                    );
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "warning",
+                        "message": "Block proposal suppressed — chain integrity failure (operator action required)",
+                    }));
                 }
                 CycleIo::BroadcastBlock(ref _block)
                     if self
@@ -4769,6 +4883,24 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 "hash": hex::encode(block_hash.as_bytes()),
                             }));
                         }
+                        CycleIo::PenalizeValidator { validator, category, reason } => {
+                            // M4: the consequence lands on the proven author's
+                            // KEY, via the same reputation path evidence uses —
+                            // not on whichever peer relayed the message.
+                            // Snapshot-and-drop: the guard closes before the
+                            // event send (consensus is rank 4; sends must not
+                            // happen under it).
+                            self.consensus
+                                .write()
+                                .reputation_mut()
+                                .record_misbehavior(validator);
+                            let _ = cycle_phase_tx.send(serde_json::json!({
+                                "event": "validator_penalized",
+                                "validator": hex::encode(validator),
+                                "category": format!("{:#04X}", *category as u8),
+                                "reason": &reason,
+                            }));
+                        }
                         _ => {}
                     }
                     // BroadcastVote, BanPeer, RequestBlock → network
@@ -4810,9 +4942,10 @@ struct StorageUtxoLookupAdapter<'a, S: StorageEngine> {
 }
 
 impl<S: StorageEngine> UtxoLookup for StorageUtxoLookupAdapter<'_, S> {
-    fn get_utxo(&self, outpoint: &noble_core::OutPoint) -> Option<(u64, bool, u64)> {
+    fn get_utxo(&self, outpoint: &noble_core::OutPoint) -> Option<noble_core::UtxoEntry> {
+        // Full entry: admission needs `address` to enforce input ownership (C1).
         match self.storage.get_utxo(outpoint) {
-            Ok(Some(entry)) => Some((entry.value, entry.is_coinbase, entry.height)),
+            Ok(Some(entry)) => Some(entry),
             _ => None,
         }
     }
@@ -6234,6 +6367,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],

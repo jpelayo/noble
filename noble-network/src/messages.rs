@@ -372,6 +372,11 @@ pub enum NetworkEvent {
         reason: String,
         category: u8,
         evidence_hash: Option<[u8; 32]>,
+        /// L2: operator-requested ban duration, when this ban came from an
+        /// explicit manual action. `None` for automatic bans, which use the
+        /// default. The requested value used to be discarded outright, so a
+        /// deliberate "ban for an hour" silently became 24 hours.
+        duration_secs: Option<u64>,
     },
     /// A node identity announcement was received from a peer.
     NodeAnnounceReceived {
@@ -417,6 +422,19 @@ pub enum NetworkEvent {
         /// Which request-response protocol the failure occurred on.
         protocol: ReqProtocol,
         /// Human-readable failure reason (for logging/observability).
+        reason: String,
+    },
+    /// The network event loop has stopped. **Terminal** — no further network
+    /// events will ever arrive on this channel.
+    ///
+    /// The loop was previously spawned fire-and-forget, its `JoinHandle`
+    /// dropped, so if it returned or panicked the process kept running with no
+    /// peer traffic at all and nothing but silence to show for it — the same
+    /// invisible-degradation shape as the 0.138.0 wedge. A malformed-length
+    /// decode could reach that state from any peer. Surfacing it as an event
+    /// lets the node treat "no networking" as the fatal condition it is.
+    ServiceTerminated {
+        /// Why the loop stopped: returned normally, panicked, or was cancelled.
         reason: String,
     },
 }

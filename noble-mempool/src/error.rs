@@ -79,6 +79,11 @@ pub enum MempoolError {
     #[error("step 6.5: double spend — input already used by a pending mempool transaction")]
     DoubleSpend,
 
+    /// Step 6.5 (C1): An input UTXO is not controlled by the transaction's
+    /// issuer — the signature does not authorise spending those coins.
+    #[error("step 6.5: input not owned by the transaction issuer")]
+    InputNotOwned,
+
     /// Step 6.5: An input UTXO has not yet reached COINBASE_MATURITY
     /// confirmations.
     #[error("step 6.5: output not yet spendable — available at block {available_at} ({blocks_remaining} block(s) remaining)")]
@@ -137,8 +142,11 @@ impl AdmissionOutcome {
         match res {
             Ok(_) => AdmissionOutcome::Accepted,
             Err(Duplicate(_)) => AdmissionOutcome::AlreadyKnown,
+            // InputNotOwned is objectively invalid, NOT a local-view rejection:
+            // the issuer's signature does not authorise those coins under any
+            // node's view of the chain, so relaying it is a peer fault.
             Err(e @ (TxTooLarge { .. } | UnrecognizedVersion(_) | StructuralValidation(_)
-                | SignatureInvalid(_))) => {
+                | SignatureInvalid(_) | InputNotOwned)) => {
                 AdmissionOutcome::ObjectivelyInvalid { reason: e.to_string() }
             }
             Err(e @ (FeeTooLow { .. } | SenderRateLimit { .. } | AtCapacity

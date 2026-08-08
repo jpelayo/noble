@@ -4,6 +4,7 @@
 //! RocksDB storage engine with 10 column families for the NOBLE protocol.
 
 pub mod catalog;
+pub mod commit_validation;
 pub mod error;
 pub mod integrity;
 pub mod introspect;

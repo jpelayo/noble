@@ -139,24 +139,32 @@ pub fn verify_bip137(sig: &[u8], message: &str) -> Result<Vec<u8>, CryptoError> 
     Ok(verifying_key.to_sec1_bytes().to_vec())
 }
 
-/// Build the canonical message string for a notarization transaction.
+/// Build the canonical BIP-137 message for a transaction (H1).
 ///
-/// Format: `"NOBLE:notarize:{checksum}:{timestamp}:{fee}:{version}"`
-pub fn notarization_message(checksum: &str, timestamp: u64, fee: u64, version: u16) -> String {
-    format!("NOBLE:notarize:{checksum}:{timestamp}:{fee}:{version}")
-}
-
-/// Build the canonical message string for a transfer transaction.
+/// Format: `"NOBLE:tx:v1:{chain_id:08x}:{signing_payload_sha256_hex}"`
 ///
-/// Format: `"NOBLE:transfer:{recipient}:{amount}:{timestamp}:{fee}:{version}"`
-pub fn transfer_message(
-    recipient: &str,
-    amount: u64,
-    timestamp: u64,
-    fee: u64,
-    version: u16,
-) -> String {
-    format!("NOBLE:transfer:{recipient}:{amount}:{timestamp}:{fee}:{version}")
+/// `payload_hash` is `sha256(tx_signing_payload_bytes(tx, chain_id))` — the
+/// same digest the native secp256k1 path signs — so one BIP-137 signature now
+/// commits to **every** field that payload covers: inputs, all outputs, chain
+/// id, tx type, timestamp, expiry, gateway, and canonically-ordered metadata.
+///
+/// # Why this replaced the per-type messages
+///
+/// The previous messages named only a couple of fields, e.g.
+/// `NOBLE:transfer:{recipient}:{amount}:{timestamp}:{fee}:{version}`. Nothing
+/// about the *inputs* was covered, so a signature could be lifted onto a
+/// different transaction that produced the same string: keep `outputs[0]`
+/// identical, add more of the signer's own UTXOs as inputs, and drop the change
+/// output — the surplus silently becomes fee. Input-ownership validation does
+/// not help, because those inputs really do belong to the signer. Committing to
+/// the full signing payload removes the class: any change to any covered field
+/// changes the digest and invalidates the signature.
+///
+/// The chain id appears both inside the payload digest and in the visible
+/// prefix — the former binds it cryptographically, the latter lets a human or a
+/// hardware wallet see which chain they are signing for.
+pub fn tx_message(chain_id: u32, payload_hash: &[u8; 32]) -> String {
+    format!("NOBLE:tx:v1:{chain_id:08x}:{}", hex::encode(payload_hash))
 }
 
 #[cfg(test)]
@@ -266,14 +274,34 @@ mod tests {
     }
 
     #[test]
-    fn notarization_message_format() {
-        let msg = notarization_message("abcdef1234", 1700000000, 1000, 1);
-        assert_eq!(msg, "NOBLE:notarize:abcdef1234:1700000000:1000:1");
+    fn tx_message_format() {
+        let hash = [0xABu8; 32];
+        let msg = tx_message(0x34E9_E7A4, &hash);
+        assert_eq!(
+            msg,
+            format!("NOBLE:tx:v1:34e9e7a4:{}", "ab".repeat(32)),
+            "the visible prefix must show the chain id so a signer can see which chain they sign for"
+        );
     }
 
     #[test]
-    fn transfer_message_format() {
-        let msg = transfer_message("recipient_hex", 50000, 1700000000, 1000, 1);
-        assert_eq!(msg, "NOBLE:transfer:recipient_hex:50000:1700000000:1000:1");
+    fn tx_message_changes_with_any_payload_change() {
+        // The whole point of H1: the message is a function of the complete
+        // signing payload, so altering ANY covered field (inputs included)
+        // changes the message and invalidates the signature. The old per-type
+        // messages named only a few fields, which let one signature be replayed
+        // onto a different transaction.
+        let base = [0x11u8; 32];
+        let mut altered = base;
+        altered[31] ^= 0x01;
+        assert_ne!(tx_message(1, &base), tx_message(1, &altered));
+    }
+
+    #[test]
+    fn tx_message_is_chain_bound() {
+        // Same transaction, different chain → different message, so a signature
+        // cannot be replayed across chains.
+        let hash = [0x22u8; 32];
+        assert_ne!(tx_message(1, &hash), tx_message(2, &hash));
     }
 }

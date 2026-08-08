@@ -49,7 +49,19 @@ where
             return Box::pin(async move { inner.call(request).await });
         }
 
-        let method = request.method_name().to_owned();
+        // M13: bucket unrecognised method names.
+        //
+        // The raw name went straight into a Prometheus label, so every
+        // misspelled or invented method minted a NEW, PERMANENT time series —
+        // unbounded cardinality driven by whatever a caller types, and the
+        // metrics endpoint is reachable before auth. Known methods keep their
+        // own series; everything else collapses to one bucket.
+        let raw = request.method_name();
+        let method: String = if crate::middleware::is_known_method(raw) {
+            raw.to_owned()
+        } else {
+            "other".to_string()
+        };
         Box::pin(async move {
             let start = std::time::Instant::now();
             let response = inner.call(request).await;

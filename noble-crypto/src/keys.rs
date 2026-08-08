@@ -168,12 +168,56 @@ impl NoblePrivateKey {
     /// this derives the real public key. For non-signing types (P2P, TLS, TOTP),
     /// the raw bytes — used only as a keystore filename, not for verification.
     pub fn public_key(&self) -> NoblePublicKey {
+        self.try_public_key()
+            .expect("secp256k1 secret invalid — validate stored key material with `validate_secret` at the point it is loaded")
+    }
+
+    /// Fallible form of [`Self::public_key`].
+    ///
+    /// Returns `None` when the stored secret is not a valid secp256k1 scalar —
+    /// possible for material that reached the type without going through
+    /// [`Self::validate_secret`] (a truncated or corrupt keystore record, for
+    /// example). Loaders should validate at the boundary so the infallible
+    /// [`Self::public_key`] is honest; this exists for paths that would rather
+    /// surface an error than trust that invariant.
+    pub fn try_public_key(&self) -> Option<NoblePublicKey> {
+        match self {
+            Self::Secp256k1(sk) | Self::ValidatorSecp256k1(sk) => {
+                let signing_key = k256::ecdsa::SigningKey::from_slice(sk).ok()?;
+                let vk = signing_key.verifying_key();
+                Some(NoblePublicKey::Secp256k1(vk.to_sec1_bytes().to_vec()))
+            }
+            other => Some(other.public_key_infallible()),
+        }
+    }
+
+    /// Validate that secret material is usable for this key's scheme.
+    ///
+    /// Call this wherever key bytes enter from storage or the wire — keystore
+    /// records, imports, deserialization — so an invalid scalar is rejected as
+    /// data instead of surfacing later as a panic in a display or signing path.
+    /// The enum's variants are public tuple constructors, so this cannot be
+    /// enforced by construction; validating at the boundary is what keeps the
+    /// invariant true in practice.
+    pub fn validate_secret(&self) -> Result<(), CryptoError> {
+        match self {
+            Self::Secp256k1(sk) | Self::ValidatorSecp256k1(sk) => {
+                k256::ecdsa::SigningKey::from_slice(sk).map(|_| ()).map_err(|e| {
+                    CryptoError::InvalidKey(format!("secp256k1 secret is not a valid scalar: {e}"))
+                })
+            }
+            // Non-signing material has no scalar constraint.
+            _ => Ok(()),
+        }
+    }
+
+    /// The synthetic-key half of [`Self::public_key`], which cannot fail.
+    fn public_key_infallible(&self) -> NoblePublicKey {
         match self {
             Self::Secp256k1(sk) | Self::ValidatorSecp256k1(sk) => {
                 let signing_key = k256::ecdsa::SigningKey::from_slice(sk)
-                    .expect("secp256k1 secret invalid — keys are validated at creation (OsRng/BIP-32) and GCM-authenticated in the keystore");
-                let vk = signing_key.verifying_key();
-                NoblePublicKey::Secp256k1(vk.to_sec1_bytes().to_vec())
+                    .expect("checked by try_public_key before reaching here");
+                NoblePublicKey::Secp256k1(signing_key.verifying_key().to_sec1_bytes().to_vec())
             }
             Self::P2pIdentity(raw) | Self::TlsKey(raw) | Self::TotpSecret(raw) | Self::FaucetPassphrase(raw) => {
                 // Synthetic: SHA-256 of raw bytes → secp256k1 pubkey, used as keystore filename only.
@@ -568,5 +612,39 @@ mod tests {
             h3.finish(),
             "different keys should produce different hashes"
         );
+    }
+
+    // --- L23: invalid secret material must not reach a panic ---
+
+    #[test]
+    fn try_public_key_returns_none_for_invalid_scalars() {
+        // Reachable from a truncated or corrupt keystore record: the variant is
+        // a public tuple constructor over a Vec, so nothing in the type system
+        // guarantees a valid 32-byte scalar.
+        for bad in [vec![], vec![0u8; 31], vec![0u8; 32], vec![0xFFu8; 32], vec![0u8; 64]] {
+            let key = NoblePrivateKey::Secp256k1(bad.clone());
+            assert!(
+                key.try_public_key().is_none(),
+                "len {} must not yield a public key", bad.len()
+            );
+            assert!(key.validate_secret().is_err(), "len {} must fail validation", bad.len());
+        }
+    }
+
+    #[test]
+    fn valid_secret_passes_validation_and_derives() {
+        let (sk, pk) = crate::secp256k1::generate_keypair();
+        let key = NoblePrivateKey::Secp256k1(sk);
+        key.validate_secret().expect("generated key must validate");
+        assert_eq!(key.try_public_key().unwrap(), NoblePublicKey::Secp256k1(pk));
+        assert_eq!(key.public_key(), key.try_public_key().unwrap());
+    }
+
+    #[test]
+    fn non_signing_material_has_no_scalar_constraint() {
+        // TOTP secrets and TLS keys are arbitrary bytes — validation must not
+        // impose a curve constraint on them.
+        assert!(NoblePrivateKey::TotpSecret(vec![0u8; 10]).validate_secret().is_ok());
+        assert!(NoblePrivateKey::TlsKey(vec![1u8; 7]).validate_secret().is_ok());
     }
 }

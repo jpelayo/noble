@@ -140,6 +140,15 @@ pub type SharedTotpSlot =
 pub type WsTicketStore = Arc<Mutex<Vec<(String, Instant)>>>;
 
 pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
+    /// H13: memo for the `getNodeInfo` data-directory walk —
+    /// (measured at, used bytes, capacity bytes).
+    ///
+    /// `dir_size` recurses the whole data directory and the dashboard polls
+    /// `getNodeInfo` continuously, so the cost grew with the chain for a figure
+    /// that barely moves. Plain `Mutex` (not a tracked lock): it guards a
+    /// self-contained cache, is never held across another acquisition, and so
+    /// takes no part in the lock hierarchy.
+    pub dir_size_cache: parking_lot::Mutex<Option<(std::time::Instant, u64, u64)>>,
     /// Block/transaction persistence. **Lock order: 2 (Storage).**
     pub storage: Arc<TrackedRwLock<S>>,
     /// Transaction mempool. **Lock order: 5 (Mempool).**
@@ -471,6 +480,22 @@ pub fn resolve_node_name<S: StorageEngine>(
 }
 
 impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
+    /// H13: directories `listShards` is permitted to scan.
+    ///
+    /// The configured data directory plus any extra storage tiers. Anything
+    /// else is off-limits: the path argument used to be honoured verbatim, so
+    /// the RPC could enumerate (and hash) arbitrary directories on the host.
+    pub fn storage_roots(&self) -> Vec<std::path::PathBuf> {
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(ref d) = self.data_dir {
+            roots.push(d.canonicalize().unwrap_or_else(|_| d.clone()));
+        }
+        for (p, _) in &self.extra_data_dirs {
+            roots.push(p.canonicalize().unwrap_or_else(|_| p.clone()));
+        }
+        roots
+    }
+
     /// Resolve a node name from wire bytes using all available sources.
     /// Convenience method that delegates to the free function [`resolve_node_name`].
     ///

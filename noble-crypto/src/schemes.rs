@@ -58,6 +58,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn signing_and_recognized_agree_over_every_u8() {
+        // L21/L22: on-chain signature checks (T5 issuer, T7 additional, B12
+        // validator) and the ValidatorSchemeUnrecognized evidence predicate must
+        // all ask the SAME question, or they disagree about which schemes are
+        // valid. They previously split: some used `is_recognized_scheme`, which
+        // also admits internal keystore ids (TLS key, TOTP secret, faucet
+        // token) that can never produce an on-chain signature — so such a
+        // transaction passed the scheme check and only failed one step later,
+        // and evidence claiming "unrecognized validator scheme" disagreed with
+        // the block rule.
+        for id in 0u8..=255 {
+            let signing = is_signing_scheme(id);
+            let recognized = is_recognized_scheme(id);
+
+            // Exactly two schemes may sign on-chain.
+            assert_eq!(
+                signing,
+                id == SCHEME_SECP256K1 || id == SCHEME_BIP137,
+                "scheme {id:#04x}: unexpected signing classification"
+            );
+            // Signing implies recognized; the converse must NOT hold.
+            if signing {
+                assert!(recognized, "scheme {id:#04x}: signing but not recognized");
+            }
+        }
+
+        // The internal ids are the ones that must be recognized yet unable to sign.
+        for internal in [
+            SCHEME_VALIDATOR_SECP256K1,
+            SCHEME_P2P_IDENTITY,
+            SCHEME_TLS_KEY,
+            SCHEME_TOTP_SECRET,
+            SCHEME_FAUCET_PASSPHRASE,
+            SCHEME_FAUCET_ADMIN_TOKEN,
+        ] {
+            assert!(is_recognized_scheme(internal));
+            assert!(
+                !is_signing_scheme(internal),
+                "internal scheme {internal:#04x} must never satisfy an on-chain signature check"
+            );
+        }
+    }
+
+    #[test]
     fn recognized_schemes() {
         assert!(is_recognized_scheme(SCHEME_SECP256K1));
         assert!(is_recognized_scheme(SCHEME_BIP137));

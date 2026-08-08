@@ -296,6 +296,7 @@ mod tests {
                 signature: vec![], // placeholder — unsigned
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![MetadataEntry {
                 key: "doc_type".into(),
                 value: b"test_report".to_vec(),

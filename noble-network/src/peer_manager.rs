@@ -83,6 +83,21 @@ impl BanCategory {
     }
 
     /// Returns the ban score penalty for this category.
+    /// M3: whether this category ignores the repeat-suppression window.
+    ///
+    /// True for cryptographically proven misbehaviour (which is not a "repeat
+    /// low-cost event" in any sense) and for explicit operator action, which
+    /// must never be silently dropped because a peer happened to be noisy.
+    pub fn bypasses_rate_limit(self) -> bool {
+        matches!(
+            self,
+            Self::DuplicateProposal
+                | Self::EvidenceReceived
+                | Self::ManualBan
+                | Self::ProtocolViolation
+        )
+    }
+
     pub fn penalty(self) -> u32 {
         match self {
             Self::InvalidBlock => 50,
@@ -299,7 +314,19 @@ pub struct PeerManager {
     banned_count: usize,
     /// AUD-L2: If mass-ban detected, cooldown pauses new bans until this instant.
     ban_cooldown: Option<Instant>,
+    /// H5: score memory for peers that are not currently connected.
+    ///
+    /// Bounded (`MAX_SCORE_HISTORY`) and decayed by elapsed time, so it neither
+    /// grows without limit nor punishes a peer indefinitely — it just stops a
+    /// reconnect from erasing everything the peer had accrued.
+    score_history: HashMap<PeerId, (u32, Instant)>,
 }
+
+/// H5: cap on retained score entries for disconnected peers.
+const MAX_SCORE_HISTORY: usize = 1024;
+
+/// H5: retained score halves every this many seconds while disconnected.
+const SCORE_HALF_LIFE_SECS: u64 = 3_600;
 
 impl PeerManager {
     /// Create a new `PeerManager` from the given configuration.
@@ -315,6 +342,7 @@ impl PeerManager {
             total_ever_seen: 0,
             banned_count: 0,
             ban_cooldown: None,
+            score_history: HashMap::new(),
         }
     }
 
@@ -352,11 +380,13 @@ impl PeerManager {
 
         let now = Instant::now();
         self.total_ever_seen += 1;
+        // H5: resume from the decayed prior score, if this identity has one.
+        let carried_score = self.take_retained_score(&peer_id);
         self.peers.insert(
             peer_id,
             PeerState {
                 direction,
-                ban_score: 0,
+                ban_score: carried_score,
                 connected_at: now,
                 last_seen: now,
                 chain_tip: None,
@@ -381,13 +411,59 @@ impl PeerManager {
     /// peers that were rejected at connection time and never tracked — callers
     /// should NOT emit `PeerDisconnected` for these.
     pub fn on_disconnected(&mut self, peer_id: &PeerId) -> bool {
-        if self.peers.remove(peer_id).is_some() {
+        if let Some(state) = self.peers.remove(peer_id) {
+            // H5: retain the accumulated score across the disconnect.
+            //
+            // Score lived only inside the connection record, so a misbehaving
+            // peer could shed everything it had accrued simply by reconnecting
+            // — repeat offenders reset to a clean slate for the price of a TCP
+            // round trip. The history is bounded and decays, so it cannot grow
+            // without limit or punish a peer forever.
+            if state.ban_score > 0 {
+                self.retain_score(*peer_id, state.ban_score);
+            }
             tracing::info!(task = "peer_disconnect", peer_id = %peer_id, "peer disconnected");
             true
         } else {
             tracing::debug!(task = "peer_disconnect", peer_id = %peer_id, "connection closed for untracked peer (rejected at connect)");
             false
         }
+    }
+
+    /// H5: remember a disconnected peer's score, evicting the oldest entry if
+    /// the table is full.
+    fn retain_score(&mut self, peer_id: PeerId, score: u32) {
+        if self.score_history.len() >= MAX_SCORE_HISTORY
+            && !self.score_history.contains_key(&peer_id)
+        {
+            if let Some(oldest) = self
+                .score_history
+                .iter()
+                .min_by_key(|(_, (_, at))| *at)
+                .map(|(id, _)| *id)
+            {
+                self.score_history.remove(&oldest);
+            }
+        }
+        self.score_history.insert(peer_id, (score, Instant::now()));
+    }
+
+    /// H5: take a reconnecting peer's decayed prior score, if any.
+    fn take_retained_score(&mut self, peer_id: &PeerId) -> u32 {
+        let Some((score, since)) = self.score_history.remove(peer_id) else {
+            return 0;
+        };
+        // Halve per half-life elapsed; a long-absent peer effectively starts fresh.
+        let halvings = since.elapsed().as_secs() / SCORE_HALF_LIFE_SECS;
+        let decayed = if halvings >= 32 { 0 } else { score >> halvings };
+        if decayed > 0 {
+            tracing::debug!(
+                task = "peer_connect",
+                peer_id = %peer_id,
+                "resuming from decayed prior score {decayed} (was {score})"
+            );
+        }
+        decayed
     }
 
     /// Immediately ban a peer regardless of cumulative score.
@@ -444,7 +520,13 @@ impl PeerManager {
             // Push the new event into the window regardless (for tracking).
             state.misbehavior_window.push_back((now, penalty));
 
-            if window_total > RATE_LIMIT_WINDOW_MAX {
+            // M3: the window exists to stop REPEATED low-cost events from
+            // snowballing. Applying it to every category meant a peer could
+            // saturate the window with cheap offences and then commit a
+            // provable, slashable one for free — and an operator's explicit
+            // ban was swallowed by the same rule. Severe categories and manual
+            // action bypass suppression; everything else still rate-limits.
+            if window_total > RATE_LIMIT_WINDOW_MAX && !reason.category.bypasses_rate_limit() {
                 tracing::warn!(
                     task = "peer_ban",
                     %peer_id,
@@ -788,7 +870,13 @@ impl PeerManager {
 
     /// Unban a peer (operator RPC). Removes from both in-memory ban map and connected peer state.
     pub fn unban(&mut self, peer_id: &PeerId) {
-        self.banned.remove(peer_id);
+        if self.banned.remove(peer_id).is_some() {
+            // M2: keep the counter honest. Only expiry used to decrement it, so
+            // an operator unban left `banned_count` permanently inflated — and
+            // that counter drives the mass-ban cooldown, which could re-arm
+            // itself and pause automatic banning for no real reason.
+            self.banned_count = self.banned_count.saturating_sub(1);
+        }
     }
 
     /// List all currently banned peers with metadata for the RPC response.

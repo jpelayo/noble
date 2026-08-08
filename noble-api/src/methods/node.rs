@@ -361,11 +361,23 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             Some(max_ver)
         };
 
-        // Calculate storage bytes by walking the data directory.
+        // H13: cache the directory walk.
+        //
+        // `dir_size` recursively stats the whole data directory, and the
+        // dashboard polls `getNodeInfo` continuously — so a growing chain made
+        // every poll progressively more expensive, for a number that changes
+        // slowly. A short TTL keeps it honest without rewalking per request.
         let (storage_bytes, storage_capacity_bytes) = if let Some(ref data_dir) = self.data_dir {
-            let used = dir_size(data_dir);
-            let capacity = disk_capacity(data_dir);
-            (Some(used), Some(capacity))
+            const DIR_SIZE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+            let mut cache = self.dir_size_cache.lock();
+            let fresh = cache
+                .as_ref()
+                .is_some_and(|(at, _, _)| at.elapsed() < DIR_SIZE_TTL);
+            if !fresh {
+                *cache = Some((std::time::Instant::now(), dir_size(data_dir), disk_capacity(data_dir)));
+            }
+            let (_, used, capacity) = cache.as_ref().expect("just populated");
+            (Some(*used), Some(*capacity))
         } else {
             (None, None)
         };
@@ -482,7 +494,10 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         // Verify the current code.
         {
             let v = validator_arc.read();
-            if !v.validate_hash(&current_code_hash) {
+            // L15: do NOT consume — the auth middleware already recorded this
+            // code as used on the way in, so consuming again is a self-inflicted
+            // replay rejection that made rotation impossible for Bearer callers.
+            if !v.validate_hash_no_consume(&current_code_hash) {
                 return Err(ApiError::AuthRequired.into());
             }
         }

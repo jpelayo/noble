@@ -100,6 +100,25 @@ impl StorageEngine for MemoryStorage {
         let mut inner = self.inner.write().unwrap();
         Self::check_open(&inner)?;
 
+        // C1/C2: shared stateful validation BEFORE any mutation (also L20 —
+        // this backend used to mutate its maps and only then run the economic
+        // checks, so a rejection left partial state behind). The borrow is
+        // scoped so `inner` is free to mutate again once the decision is made,
+        // and the decision itself comes from the same validator RocksDB uses.
+        {
+            struct View<'a>(&'a HashMap<OutPoint, UtxoEntry>);
+            impl crate::commit_validation::UtxoReadView for View<'_> {
+                fn utxo_at(&self, outpoint: &OutPoint) -> Result<Option<UtxoEntry>, StorageError> {
+                    Ok(self.0.get(outpoint).cloned())
+                }
+            }
+            crate::commit_validation::validate_block_economics(
+                &View(&inner.utxo_set),
+                block,
+                tx_ids,
+            )?;
+        }
+
         // Store block
         inner.blocks.insert(*block_hash, block.clone());
         inner.block_heights.insert(block.header.height, *block_hash);
@@ -281,16 +300,43 @@ impl StorageEngine for MemoryStorage {
             inner.created_outputs.insert(height, created_outputs);
         }
 
-        // Verify coinbase output value matches subsidy + collected fees
+        // Verify block reward + fee distribution outputs match subsidy + fees.
+        //
+        // M6 parity: this MUST accept exactly the same shapes as the RocksDB
+        // backend, which recognises TWO layouts. Knowing only the legacy one
+        // meant a split-format block committed on RocksDB and was rejected here
+        // — a backend-dependent consensus split between node deployments.
+        //   • Split  (index 0 = block reward == subsidy; index 1 = TX_TYPE_FEE == fees)
+        //   • Legacy (single coinbase carrying subsidy + fees merged)
         let subsidy = subsidy_at_height(height);
-        if let Some(coinbase_tx) = block.transactions.first() {
-            if coinbase_tx.is_coinbase() {
-                let coinbase_total: u64 = coinbase_tx.outputs.iter().map(|o| o.value).sum();
-                let expected = subsidy + total_fees;
-                if coinbase_total != expected {
-                    return Err(StorageError::Database(format!(
-                        "coinbase output mismatch: got {coinbase_total}, expected {expected} (subsidy {subsidy} + fees {total_fees})"
-                    )));
+        if let Some(reward_tx) = block.transactions.first() {
+            if reward_tx.is_coinbase() {
+                let reward_total: u64 = reward_tx.outputs.iter().map(|o| o.value).sum();
+                let has_fee_dist = block
+                    .transactions
+                    .get(1)
+                    .map(|tx| tx.tx_type == noble_core::TX_TYPE_FEE)
+                    .unwrap_or(false);
+                if has_fee_dist {
+                    if reward_total != subsidy {
+                        return Err(StorageError::Database(format!(
+                            "block reward mismatch: got {reward_total}, expected {subsidy}"
+                        )));
+                    }
+                    let fee_total: u64 =
+                        block.transactions[1].outputs.iter().map(|o| o.value).sum();
+                    if fee_total != total_fees {
+                        return Err(StorageError::Database(format!(
+                            "fee distribution mismatch: got {fee_total}, expected {total_fees}"
+                        )));
+                    }
+                } else {
+                    let expected = subsidy + total_fees;
+                    if reward_total != expected {
+                        return Err(StorageError::Database(format!(
+                            "coinbase output mismatch: got {reward_total}, expected {expected} (subsidy {subsidy} + fees {total_fees})"
+                        )));
+                    }
                 }
             }
         }
@@ -1157,6 +1203,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -1187,6 +1234,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -1222,6 +1270,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2070,6 +2119,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata,
             encrypted_locator: None,
             external_attestations: vec![],

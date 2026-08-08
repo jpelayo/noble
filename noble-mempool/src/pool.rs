@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use noble_core::{
-    OutPoint, Transaction, MAX_TX_SIZE, META_KEY_PREV_CHECKSUM,
+    OutPoint, Transaction, UtxoEntry, MAX_TX_SIZE, META_KEY_PREV_CHECKSUM,
     wire::WireFormat,
 };
 use noble_crypto::Hash256;
@@ -151,9 +151,26 @@ impl ChainLookup for NoChainLookup {
 /// Decoupled from `ChainLookup` (SRP) following the project pattern of
 /// one trait per concern (ChainLookup, BlockProvider, TxProvider).
 pub trait UtxoLookup {
-    /// Look up a UTXO by its outpoint. Returns `(value, is_coinbase, creation_height)` if it
-    /// exists and is unspent on-chain. Returns `None` if the UTXO doesn't exist or is already spent.
-    fn get_utxo(&self, outpoint: &OutPoint) -> Option<(u64, bool, u64)>;
+    /// Look up a UTXO by its outpoint, returning the **complete** entry if it
+    /// exists and is unspent on-chain, or `None` if it does not exist or is
+    /// already spent.
+    ///
+    /// The full [`UtxoEntry`] (not just value/height) is required because
+    /// admission must check that the transaction's issuer actually controls the
+    /// address the coins sit at — the owner lives only in the UTXO set, so a
+    /// lookup that dropped `address` made the ownership rule unenforceable here.
+    fn get_utxo(&self, outpoint: &OutPoint) -> Option<UtxoEntry>;
+
+    /// Whether the entries this lookup returns carry **real** owner addresses.
+    ///
+    /// Stubs that fabricate UTXOs (see [`NoUtxoLookup`]) cannot know the real
+    /// owner, so they must return `false`; admission then skips the ownership
+    /// rule rather than rejecting every transaction against a fabricated owner.
+    /// Production implementations back onto the real UTXO set and MUST leave
+    /// this `true` — overriding it disables C1 for that path.
+    fn provides_real_owners(&self) -> bool {
+        true
+    }
 }
 
 /// A no-op UTXO lookup that always returns a fixed-value non-coinbase UTXO.
@@ -165,8 +182,22 @@ pub struct NoUtxoLookup;
 pub const NO_UTXO_LOOKUP_VALUE: u64 = 100_000_000;
 
 impl UtxoLookup for NoUtxoLookup {
-    fn get_utxo(&self, _outpoint: &OutPoint) -> Option<(u64, bool, u64)> {
-        Some((NO_UTXO_LOOKUP_VALUE, false, 0))
+    fn get_utxo(&self, _outpoint: &OutPoint) -> Option<UtxoEntry> {
+        Some(UtxoEntry {
+            value: NO_UTXO_LOOKUP_VALUE,
+            // Placeholder only — `provides_real_owners()` is false, so admission
+            // never treats this as an ownership claim.
+            address: noble_core::address::NobleAddress::Noble(
+                noble_crypto::NoblePublicKey::Secp256k1(vec![0u8; 33]),
+            ),
+            height: 0,
+            is_coinbase: false,
+        })
+    }
+
+    /// This stub fabricates UTXOs and cannot know their real owner.
+    fn provides_real_owners(&self) -> bool {
+        false
     }
 }
 
@@ -175,6 +206,11 @@ pub struct Mempool {
     config: MempoolConfig,
     /// Primary index: tx_id → entry.
     by_id: HashMap<Hash256, MempoolEntry>,
+    /// A1: intent_id → tx_id of the resident expressing that intent.
+    /// Lets admission reject a malleated variant (same signed intent, different
+    /// bytes) that `by_id` cannot see. First-seen wins, so this maps to exactly
+    /// one resident.
+    by_intent: HashMap<Hash256, Hash256>,
     /// Fee-rate index: fee → set of tx_ids (for block assembly and eviction).
     by_fee_rate: BTreeMap<u64, HashSet<Hash256>>,
     /// Checksum index: document checksum → set of tx_ids.
@@ -222,6 +258,7 @@ impl Mempool {
         Self {
             config,
             by_id: HashMap::new(),
+            by_intent: HashMap::new(),
             by_fee_rate: BTreeMap::new(),
             by_checksum: HashMap::new(),
             by_timestamp: BTreeMap::new(),
@@ -543,10 +580,26 @@ impl Mempool {
             .compute_tx_id(self.config.chain_id.load(std::sync::atomic::Ordering::Relaxed))
             .map_err(|e| MempoolError::Internal(e.to_string()))?;
 
-        // Step 2: Duplicate check
+        // Step 2: Duplicate check — by exact bytes, then by intent.
         tracing::trace!("mempool step 2: duplicate check");
         if self.by_id.contains_key(&tx_id) || chain.is_confirmed(&tx_id) {
             return Err(MempoolError::Duplicate(tx_id.to_string()));
+        }
+
+        // A1: same signed intent, different bytes. Appending a signature (T7
+        // accepts one from anybody) yields a different tx_id but the SAME
+        // intent_id, so a byte-level check alone would admit a second copy of
+        // the same payment. FIRST-SEEN WINS: the variant is refused and the
+        // resident is never replaced or evicted — replacement would be
+        // non-deterministic across nodes and buys nothing, since both express
+        // the identical signed intent.
+        let intent_id = tx
+            .compute_intent_id(self.config.chain_id.load(std::sync::atomic::Ordering::Relaxed))
+            .map_err(|e| MempoolError::Internal(e.to_string()))?;
+        if let Some(resident) = self.by_intent.get(&intent_id) {
+            return Err(MempoolError::Duplicate(format!(
+                "{tx_id} duplicates the intent of resident {resident}"
+            )));
         }
 
         // Step 2.5: Per-sender rate limit
@@ -631,8 +684,13 @@ impl Mempool {
             }
         })?;
 
-        // Step 6.5: UTXO existence + double-spend check
+        // Step 6.5: UTXO existence + ownership + double-spend check
         tracing::trace!("mempool step 6.5: UTXO validation");
+        // C1: the key that must control every input. Derived once — a scheme we
+        // cannot map to an address is a rejection, never an ownership pass.
+        let issuer_key = noble_core::stateful_validation::issuer_public_key(tx)
+            .map_err(|e| MempoolError::StructuralValidation(e.to_string()))?;
+        let enforce_ownership = utxos.provides_real_owners();
         let mut input_value_sum: u64 = 0;
         let mut parent_deps: HashSet<Hash256> = HashSet::new();
         for input in &tx.inputs {
@@ -652,20 +710,37 @@ impl Mempool {
 
             // Verify UTXO exists: check on-chain first, then mempool outputs
             match utxos.get_utxo(outpoint) {
-                Some((value, _is_coinbase, creation_height)) => {
+                Some(entry) => {
                     // Maturity check — ALL UTXOs need COINBASE_MATURITY confirmations.
-                    if chain_height < creation_height + noble_core::COINBASE_MATURITY {
-                        let blocks_remaining = (creation_height + noble_core::COINBASE_MATURITY).saturating_sub(chain_height);
+                    if chain_height < entry.height + noble_core::COINBASE_MATURITY {
+                        let blocks_remaining = (entry.height + noble_core::COINBASE_MATURITY).saturating_sub(chain_height);
                         return Err(MempoolError::ImmatureInput {
-                            available_at: creation_height + noble_core::COINBASE_MATURITY,
+                            available_at: entry.height + noble_core::COINBASE_MATURITY,
                             blocks_remaining,
                         });
                     }
-                    input_value_sum = input_value_sum.saturating_add(value);
+
+                    // C1: the issuer must control the address holding these coins.
+                    // Enforced here as well as at commit so a transaction that
+                    // could never be committed is not admitted, relayed, or
+                    // packed into a block this node proposes.
+                    if enforce_ownership && !entry.address.is_controlled_by(&issuer_key) {
+                        return Err(MempoolError::InputNotOwned);
+                    }
+
+                    input_value_sum = input_value_sum.saturating_add(entry.value);
                 }
                 None => {
                     // Not on-chain — check mempool outputs (unconfirmed tx chaining)
-                    if let Some((value, _addr_wire)) = self.mempool_outputs.get(outpoint) {
+                    if let Some((value, addr_wire)) = self.mempool_outputs.get(outpoint) {
+                        // Same ownership rule for unconfirmed parents.
+                        let parent_addr = noble_core::address::NobleAddress::from_wire_bytes(addr_wire)
+                            .map_err(|e| MempoolError::StructuralValidation(format!(
+                                "unreadable mempool output address: {e}"
+                            )))?;
+                        if enforce_ownership && !parent_addr.is_controlled_by(&issuer_key) {
+                            return Err(MempoolError::InputNotOwned);
+                        }
                         input_value_sum = input_value_sum.saturating_add(*value);
                         // Record dependency on the tx that created this output
                         if let Some(parent_id) = self.output_creator.get(outpoint) {
@@ -769,6 +844,17 @@ impl Mempool {
             Some(e) => e,
             None => return,
         };
+
+        // A1: drop the intent claim, but only if it still points at THIS tx —
+        // never steal a claim a later resident owns.
+        if let Ok(intent_id) = entry
+            .tx
+            .compute_intent_id(self.config.chain_id.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            if self.by_intent.get(&intent_id) == Some(tx_id) {
+                self.by_intent.remove(&intent_id);
+            }
+        }
 
         // Remove from fee-rate index
         if let Some(set) = self.by_fee_rate.get_mut(&entry.fee_rate) {
@@ -906,6 +992,7 @@ impl Mempool {
     /// floor and sig cache reset too — they describe the old chain's load.
     pub fn clear(&mut self) {
         self.by_id.clear();
+        self.by_intent.clear();
         self.by_fee_rate.clear();
         self.by_checksum.clear();
         self.by_timestamp.clear();
@@ -1024,6 +1111,17 @@ impl Mempool {
             self.by_expiry.entry(expires_at).or_default().insert(tx_id);
         }
         self.by_id.insert(tx_id, entry);
+        // A1: keep the intent index in step with by_id so a malleated variant
+        // is recognised while this tx is resident.
+        if let Ok(intent_id) = self
+            .by_id
+            .get(&tx_id)
+            .expect("just inserted")
+            .tx
+            .compute_intent_id(self.config.chain_id.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            self.by_intent.insert(intent_id, tx_id);
+        }
         self.by_fee_rate.entry(fee_rate).or_default().insert(tx_id);
         self.by_checksum.entry(checksum).or_default().insert(tx_id);
         self.by_timestamp
@@ -1225,6 +1323,18 @@ mod tests {
     use noble_crypto::{
         secp256k1, sha256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope, SCHEME_SECP256K1,
     };
+
+    /// A fabricated on-chain UTXO for lookups that cannot know the real owner.
+    /// Paired with `provides_real_owners() == false`, so the placeholder address
+    /// is never mistaken for an ownership claim.
+    fn stub_utxo(value: u64) -> UtxoEntry {
+        UtxoEntry {
+            value,
+            address: NobleAddress::Noble(NoblePublicKey::Secp256k1(vec![0u8; 33])),
+            height: 0,
+            is_coinbase: false,
+        }
+    }
     use noble_test_utils::fixtures::test_chain_id;
 
     /// Test fee that passes the fee_rate floor (MIN_RELAY_FEE_RATE=1 groat/byte).
@@ -1267,6 +1377,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -1540,6 +1651,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![
                 MetadataEntry {
                     key: "dup".into(),
@@ -1631,6 +1743,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -1644,9 +1757,12 @@ mod tests {
         // Custom UTXO lookup that returns the exact input value
         struct ExactUtxoLookup { outpoint: OutPoint, value: u64 }
         impl UtxoLookup for ExactUtxoLookup {
-            fn get_utxo(&self, op: &OutPoint) -> Option<(u64, bool, u64)> {
-                if *op == self.outpoint { Some((self.value, false, 0)) } else { None }
+            fn get_utxo(&self, op: &OutPoint) -> Option<UtxoEntry> {
+                if *op == self.outpoint {
+                    Some(stub_utxo(self.value))
+                } else { None }
             }
+            fn provides_real_owners(&self) -> bool { false }
         }
         let utxo = ExactUtxoLookup { outpoint, value: input_value };
 
@@ -1799,9 +1915,81 @@ mod tests {
     /// A UTXO lookup that returns None for all outpoints (nothing exists).
     struct EmptyUtxoLookup;
     impl UtxoLookup for EmptyUtxoLookup {
-        fn get_utxo(&self, _outpoint: &OutPoint) -> Option<(u64, bool, u64)> {
+        fn get_utxo(&self, _outpoint: &OutPoint) -> Option<UtxoEntry> {
             None
         }
+    }
+
+    /// A lookup reporting a REAL owner, so C1 is enforced against it.
+    struct OwnedUtxoLookup {
+        outpoint: OutPoint,
+        value: u64,
+        owner: NobleAddress,
+    }
+    impl UtxoLookup for OwnedUtxoLookup {
+        fn get_utxo(&self, op: &OutPoint) -> Option<UtxoEntry> {
+            if *op == self.outpoint {
+                Some(UtxoEntry {
+                    value: self.value,
+                    address: self.owner.clone(),
+                    height: 0,
+                    is_coinbase: false,
+                })
+            } else {
+                None
+            }
+        }
+        // Real owner data — ownership IS enforceable here.
+        fn provides_real_owners(&self) -> bool { true }
+    }
+
+    #[test]
+    fn admission_rejects_spending_a_utxo_owned_by_another_key() {
+        // C1 at admission: without this, a theft transaction would be admitted,
+        // relayed to peers, and could be packed into a block this node proposes
+        // — which every other node would then reject.
+        let (thief_sk, thief_pk) = secp256k1::generate_keypair();
+        let (_victim_sk, victim_pk) = secp256k1::generate_keypair();
+        let (_r_sk, recipient_pk) = secp256k1::generate_keypair();
+
+        let outpoint = OutPoint { txid: Hash256::from_bytes([0x42; 32]), vout: 0 };
+        let victim_owner = NobleAddress::Noble(NoblePublicKey::Secp256k1(victim_pk.clone()));
+        let utxos = OwnedUtxoLookup { outpoint: outpoint.clone(), value: 100_000_000, owner: victim_owner };
+
+        // Signed by the thief, spending the victim's coins.
+        let tx = make_signed_transfer_with_outpoint(
+            &thief_sk, &thief_pk, &recipient_pk, outpoint, 50_000_000, 40_000_000,
+        );
+
+        let mut pool = Mempool::new(test_config());
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &utxos, 10);
+
+        assert!(
+            matches!(result, Err(MempoolError::InputNotOwned)),
+            "theft must be rejected at admission, got {result:?}"
+        );
+        assert_eq!(pool.len(), 0, "rejected tx must not enter the pool");
+    }
+
+    #[test]
+    fn admission_accepts_when_issuer_owns_the_input() {
+        // The same shape as the theft test, but the issuer owns the UTXO —
+        // guards against the ownership rule rejecting everything.
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_r_sk, recipient_pk) = secp256k1::generate_keypair();
+
+        let outpoint = OutPoint { txid: Hash256::from_bytes([0x43; 32]), vout: 0 };
+        let owner = NobleAddress::Noble(NoblePublicKey::Secp256k1(pk.clone()));
+        let utxos = OwnedUtxoLookup { outpoint: outpoint.clone(), value: 100_000_000, owner };
+
+        let tx = make_signed_transfer_with_outpoint(
+            &sk, &pk, &recipient_pk, outpoint, 50_000_000, 40_000_000,
+        );
+
+        let mut pool = Mempool::new(test_config());
+        pool.admit(&tx, 1_700_000_000, &NoChainLookup, &utxos, 10)
+            .expect("issuer-owned input must be admitted");
+        assert_eq!(pool.len(), 1);
     }
 
     /// Build a signed transfer tx (UTXO model) with a specific outpoint.
@@ -1837,6 +2025,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2048,6 +2237,10 @@ mod tests {
                 value: pc.as_bytes().to_vec(),
             });
         }
+        // T9b: metadata must be in canonical order on the wire. Builders sort
+        // before signing — `doc:prev_checksum` precedes `doc:version`, which is
+        // not the order they are pushed above.
+        noble_core::metadata::sort_canonical(&mut metadata);
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 0,
@@ -2061,6 +2254,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata,
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2149,6 +2343,7 @@ mod tests {
                 signature: vec![],
             },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2171,10 +2366,11 @@ mod tests {
     /// Lookup returning a mature on-chain UTXO for any registered outpoint.
     struct MapUtxoLookup(std::collections::HashMap<OutPoint, u64>);
     impl UtxoLookup for MapUtxoLookup {
-        fn get_utxo(&self, op: &OutPoint) -> Option<(u64, bool, u64)> {
-            // (value, is_coinbase=false, creation_height=0) → mature at any height ≥ 3.
-            self.0.get(op).map(|&v| (v, false, 0))
+        fn get_utxo(&self, op: &OutPoint) -> Option<UtxoEntry> {
+            // height 0, non-coinbase → mature at any height >= COINBASE_MATURITY.
+            self.0.get(op).map(|&v| stub_utxo(v))
         }
+        fn provides_real_owners(&self) -> bool { false }
     }
 
     /// A confirmed block tx (spending `op`) that was NOT in this node's mempool
@@ -2266,6 +2462,7 @@ mod tests {
                 timestamp: 1_700_000_000,
                 issuer_sig: SignatureEnvelope { scheme_id: SCHEME_SECP256K1, public_key: pk.to_vec(), signature: vec![] },
                 additional_sigs: vec![],
+                declared_cosigners: Vec::new(),
                 metadata: vec![],
                 encrypted_locator: None,
                 external_attestations: vec![],
@@ -2348,6 +2545,7 @@ mod tests {
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope { scheme_id: SCHEME_SECP256K1, public_key: pk.to_vec(), signature: vec![] },
             additional_sigs: vec![],
+            declared_cosigners: Vec::new(),
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
@@ -2735,5 +2933,70 @@ mod tests {
         assert_eq!(pool.expire(exp + 1), 2, "sweep must cascade to descendants");
         assert!(pool.is_empty());
         assert!(!pool.contains(&p_id) && !pool.contains(&c_id));
+    }
+
+    // --- A1: intent-level deduplication ---
+
+    #[test]
+    fn appending_a_signature_does_not_admit_a_second_copy() {
+        // T7 accepts an additional signature from ANYBODY, and appending one
+        // changes the wire bytes (so a different tx_id) while leaving the
+        // signed intent identical. Byte-level dedup alone would therefore let
+        // the same payment into the pool twice.
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_r_sk, recipient_pk) = secp256k1::generate_keypair();
+        let outpoint = OutPoint { txid: Hash256::from_bytes([0x51; 32]), vout: 0 };
+        let owner = NobleAddress::Noble(NoblePublicKey::Secp256k1(pk.clone()));
+        let utxos = OwnedUtxoLookup { outpoint: outpoint.clone(), value: 100_000_000, owner };
+
+        let tx = make_signed_transfer_with_outpoint(
+            &sk, &pk, &recipient_pk, outpoint, 50_000_000, 40_000_000,
+        );
+
+        let mut pool = Mempool::new(test_config());
+        pool.admit(&tx, 1_700_000_000, &NoChainLookup, &utxos, 10).expect("first admit");
+
+        // A stranger appends their own valid signature over the same payload.
+        let (other_sk, other_pk) = secp256k1::generate_keypair();
+        let mut variant = tx.clone();
+        let msg = variant.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        let other_priv = NoblePrivateKey::Secp256k1(other_sk);
+        variant.additional_sigs.push(other_priv.sign(&msg).unwrap());
+        let _ = other_pk;
+
+        let a = tx.compute_tx_id(test_chain_id()).unwrap();
+        let b = variant.compute_tx_id(test_chain_id()).unwrap();
+        assert_ne!(a, b, "appending a signature must change tx_id");
+        assert_eq!(
+            tx.compute_intent_id(test_chain_id()).unwrap(),
+            variant.compute_intent_id(test_chain_id()).unwrap(),
+            "but the signed intent is unchanged"
+        );
+
+        let result = pool.admit(&variant, 1_700_000_000, &NoChainLookup, &utxos, 10);
+        assert!(matches!(result, Err(MempoolError::Duplicate(_))), "got {result:?}");
+        assert_eq!(pool.len(), 1, "first-seen wins — the resident is not replaced");
+    }
+
+    #[test]
+    fn intent_claim_is_released_when_the_resident_leaves() {
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_r_sk, recipient_pk) = secp256k1::generate_keypair();
+        let outpoint = OutPoint { txid: Hash256::from_bytes([0x52; 32]), vout: 0 };
+        let owner = NobleAddress::Noble(NoblePublicKey::Secp256k1(pk.clone()));
+        let utxos = OwnedUtxoLookup { outpoint: outpoint.clone(), value: 100_000_000, owner };
+        let tx = make_signed_transfer_with_outpoint(
+            &sk, &pk, &recipient_pk, outpoint, 50_000_000, 40_000_000,
+        );
+
+        let mut pool = Mempool::new(test_config());
+        pool.admit(&tx, 1_700_000_000, &NoChainLookup, &utxos, 10).unwrap();
+        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
+        pool.remove(&tx_id);
+        assert_eq!(pool.len(), 0);
+
+        // The intent is free again, so the same tx can be re-admitted.
+        pool.admit(&tx, 1_700_000_000, &NoChainLookup, &utxos, 10)
+            .expect("intent claim must be released on removal");
     }
 }

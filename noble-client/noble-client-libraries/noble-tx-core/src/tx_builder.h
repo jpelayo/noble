@@ -70,6 +70,15 @@ typedef struct {
     noble_sig_envelope_t issuer_sig;
     noble_sig_envelope_t additional_sigs[MAX_SIGS];
     uint8_t              additional_sig_count;
+    // CS1: keys the issuer permits to co-sign, in wire form
+    // [scheme_id || key_bytes]. Covered by the signing payload, so the issuer
+    // commits to WHO may ever appear on the record. Empty (count 0) means no
+    // co-signatures are accepted — and is then omitted from the encoding, so a
+    // transaction that declares none encodes exactly as before.
+    // MIRRORS noble-core `Transaction::declared_cosigners`.
+    uint8_t  declared_cosigners[MAX_SIGS][34];
+    uint8_t  declared_cosigner_lens[MAX_SIGS];
+    uint8_t  declared_cosigner_count;
     noble_metadata_t metadata[MAX_METADATA];
     uint8_t          metadata_count;
     uint8_t  gateway_address[34];
@@ -84,6 +93,13 @@ void tx_encode_full(noble_buf_t *buf, const noble_tx_t *tx);
 
 // Encode a TxSigningPayload to CBOR (for signing message computation).
 // chain_id is included in the payload but NOT in the full transaction.
+// Sort tx->metadata into canonical order (by key, then value), in place.
+//
+// MUST be called before signing: noble-core rejects a transaction whose
+// metadata is not canonically ordered on the wire (T9b), and the signing
+// payload must describe the same order the wire carries.
+void tx_canonicalize_metadata(noble_tx_t *tx);
+
 void tx_encode_signing_payload(noble_buf_t *buf, const noble_tx_t *tx, uint32_t chain_id);
 
 // Encode a NobleAddress in serde enum format:

@@ -554,6 +554,32 @@ impl VoteManager {
 
     /// Return the wire-format public key bytes of all R1 voters for a specific candidate.
     /// Used by per-block vote witness storage to record exactly who approved each block.
+    /// Return the actual **signed** votes cast for `candidate`, in deterministic
+    /// order (by voter key, then round).
+    ///
+    /// The tallies elsewhere in this type keep only voter *keys*, which is
+    /// enough to count but proves nothing to anyone else: a node importing
+    /// history has no way to check that those validators really voted. These
+    /// are the signed `PorVote`s (already retained for evidence), so they can be
+    /// persisted alongside a block as a verifiable witness certificate.
+    pub fn signed_votes_for_candidate(&self, candidate: &Hash256) -> Vec<PorVote> {
+        let mut votes: Vec<PorVote> = self
+            .first_votes
+            .values()
+            .filter(|v| v.candidate_hash == *candidate)
+            .cloned()
+            .collect();
+        // Deterministic ordering so the stored certificate is byte-stable
+        // across nodes and restarts.
+        votes.sort_by(|a, b| {
+            a.voter_pubkey
+                .to_wire_bytes()
+                .cmp(&b.voter_pubkey.to_wire_bytes())
+                .then(a.round.cmp(&b.round))
+        });
+        votes
+    }
+
     pub fn r1_voters_for(&self, candidate: &Hash256) -> Vec<Vec<u8>> {
         self.votes
             .get(candidate)

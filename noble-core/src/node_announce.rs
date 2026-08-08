@@ -266,12 +266,29 @@ impl NodeAnnounce {
         Ok(*sha256(&payload_bytes).as_bytes())
     }
 
-    /// Verify the embedded signature against the signing payload.
+    /// Verify the embedded signature against the signing payload, and that the
+    /// signer is the identity being claimed (H3).
+    ///
+    /// `verify_standalone` checks the signature against the key carried in the
+    /// envelope, which proves only that *somebody* signed. `identity_key` is
+    /// inside the signed payload, but nothing previously required the two to
+    /// match — so an attacker could announce `identity_key = victim`, sign with
+    /// their own key, and have it verify. Peer state is keyed by identity, so
+    /// that let anyone publish addresses and chain tips under another node's
+    /// identity.
     pub fn verify_signature(&self) -> Result<(), CryptoError> {
         let msg = self
             .compute_signing_message()
             .map_err(|e| CryptoError::VerificationFailed(e.to_string()))?;
-        self.signature.verify_standalone(&msg)
+        self.signature.verify_standalone(&msg)?;
+
+        let signer = self.signature.to_noble_public_key()?;
+        if signer.to_wire_bytes() != self.identity_key.to_wire_bytes() {
+            return Err(CryptoError::VerificationFailed(
+                "announce signer does not match the claimed identity_key".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Create a signed NodeAnnounce. The signer must correspond to `identity_key`.
@@ -1047,5 +1064,24 @@ mod tests {
         let result: Result<NodeRole, _> = "Bogus".parse();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unknown NodeRole"));
+    }
+
+    #[test]
+    fn h3_announce_signer_must_be_the_claimed_identity() {
+        // Peer state is keyed by identity, so accepting an announce whose
+        // signer differs from identity_key let anyone publish addresses and
+        // chain tips under another node's identity.
+        let (attacker_sk, attacker_pk) = make_test_keypair();
+        let (_victim_sk, victim_pk) = make_test_keypair();
+
+        let mut announce = make_announce(&attacker_sk, &attacker_pk, 1_700_000_000);
+        assert!(announce.verify_signature().is_ok(), "attacker's own announce is valid");
+
+        // Claim the victim's identity, keeping the attacker's signature.
+        announce.identity_key = victim_pk;
+        assert!(
+            announce.verify_signature().is_err(),
+            "an announce signed by a different key must not claim another identity"
+        );
     }
 }

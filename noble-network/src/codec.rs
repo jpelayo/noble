@@ -21,13 +21,24 @@ pub const MAX_GOSSIP_MESSAGE_SIZE: usize = 256 * 1024;
 /// This constant declares OUR expectation so a future libp2p upgrade
 /// that drops or widens those limits is visible at the project level.
 ///
-/// 8 MB matches `MAX_BLOCK_SIZE` with headroom for CBOR envelope overhead;
-/// larger than any honest peer ever sends, smaller than libp2p's response
-/// cap so the inner-codec gate fires first.
+/// Allowance for everything wrapped *around* a block in a sync response: the
+/// response enum tag, CBOR map keys, length prefixes and any accompanying
+/// metadata. Deliberately generous — it only has to bound overhead, and the
+/// binding runtime limit is still libp2p's response cap.
+pub const MAX_SYNC_ENVELOPE_BYTES: usize = 256 * 1024;
+
+/// Project-level cap on a single request_response frame.
 ///
-/// The drift test in `noble-network/src/behaviour.rs::tests` asserts
-/// libp2p's caps stay within these bounds.
-pub const MAX_REQUEST_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+/// Derived, not hand-tuned: a maximal honest block plus its envelope. It was
+/// previously written as a bare `8 * 1024 * 1024` and documented as "matches
+/// `MAX_BLOCK_SIZE` with headroom for CBOR envelope overhead" — but it was
+/// exactly *equal* to `MAX_BLOCK_SIZE`, so the headroom the comment promised
+/// did not exist. Serving a block at the block-size limit therefore had no
+/// budget for its own framing. Stating the relationship in code keeps the two
+/// constants from drifting apart again, and `constants_leave_envelope_headroom`
+/// pins it.
+pub const MAX_REQUEST_RESPONSE_BYTES: usize =
+    noble_core::MAX_BLOCK_SIZE + MAX_SYNC_ENVELOPE_BYTES;
 
 /// Encode a [`GossipMessage`] to CBOR bytes.
 pub fn encode_gossip(msg: &GossipMessage) -> Result<Vec<u8>, NetworkError> {
