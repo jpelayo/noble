@@ -1312,6 +1312,15 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         Ok(LoggingConfigResponse {
             max_size_bytes,
             file_enabled: max_size_bytes > 0,
+            file_path: self
+                .trace_handle
+                .as_ref()
+                .and_then(|h| h.log_file_path().map(str::to_string)),
+            max_files: self
+                .trace_handle
+                .as_ref()
+                .map(|h| h.log_max_files())
+                .unwrap_or(0),
         })
     }
 
@@ -1922,7 +1931,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             }
         }
 
-        // Reset consensus engine — enters pre-genesis mode (cycles = 0 until
+        // Reset consensus engine — enters uninitialized mode (cycles = 0 until
         // new chain's block 1 sets the epoch).
         {
             let storage = self.storage.read();

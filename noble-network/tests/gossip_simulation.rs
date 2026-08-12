@@ -155,9 +155,16 @@ async fn drain_until<F: Fn(&NetworkEvent) -> bool>(
 }
 
 /// Create and sign a NodeAnnounce with optional chain_tip fields.
+///
+/// `chain_id` matters at the ingress filter: an announce on a *different*
+/// chain is dropped. `chain_id == 0` is accepted only from a genuinely
+/// uninitialized peer (`chain_tip_height` 0/absent) — a peer claiming chain 0
+/// while reporting a real height is exactly the spoof the filter blocks, so a
+/// test announcing a tip must announce it on the node's own chain.
 fn make_signed_announce(
     sk: &NoblePrivateKey,
     pk: &NoblePublicKey,
+    chain_id: u32,
     chain_tip_height: Option<u64>,
     chain_tip_hash: Option<[u8; 32]>,
     proposed_height: Option<u64>,
@@ -183,7 +190,7 @@ fn make_signed_announce(
         chain_tip_hash,
         proposed_height,
         proposed_hash,
-        0,
+        chain_id,
         String::new(),
         None, // chain_vote_weight
         None, // min_fee_rate
@@ -217,7 +224,7 @@ async fn gossip_node_announce_end_to_end() {
 
     // Create and publish a signed NodeAnnounce.
     let (sk, pk) = make_keypair();
-    let announce = make_signed_announce(&sk, &pk, None, None, None, None);
+    let announce = make_signed_announce(&sk, &pk, 0, None, None, None, None);
     node_a
         .command_sender()
         .send(NetworkCommand::PublishNodeAnnounce(Box::new(
@@ -261,7 +268,8 @@ async fn gossip_node_announce_chain_tip_emits_peer_update() {
     // Create announce with chain_tip_height=42.
     let (sk, pk) = make_keypair();
     let tip_hash = [0xBB_u8; 32];
-    let announce = make_signed_announce(&sk, &pk, Some(42), Some(tip_hash), None, None);
+    let announce =
+        make_signed_announce(&sk, &pk, test_chain_id(), Some(42), Some(tip_hash), None, None);
     node_a
         .command_sender()
         .send(NetworkCommand::PublishNodeAnnounce(Box::new(announce)))

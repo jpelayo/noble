@@ -51,7 +51,12 @@ pub enum EntryStatus {
     Pending,
     Requested { at: u64 },
     Done,
+    /// The peer answered and we rejected the block, `attempts` times.
     Failed { attempts: u8 },
+    /// The peer never answered after `retries` re-requests. Distinct from
+    /// `Failed`: nothing was delivered, so there is nothing to blame the block
+    /// for and the operator message must not claim a validation failure.
+    Stalled { retries: u64 },
 }
 
 /// Sync state machine — replaces 5 loose fields with explicit states.
@@ -356,6 +361,17 @@ pub struct HealingManager<S: StorageEngine + Send + Sync + 'static> {
     sync_progress_current: Arc<AtomicU64>,
     /// Overall sync target height — shared with RPC/GUI.
     sync_progress_total: Arc<AtomicU64>,
+    /// L11 read-only integrity halt, shared with `Node`. Set when chain data
+    /// is proven damaged and no intact prefix could be recovered; suppresses
+    /// block proposals until an operator intervenes.
+    integrity_failed: Arc<AtomicBool>,
+    /// Blocks handed to us for import, accepted or rejected. See
+    /// [`HealingManager::sync_blocks_delivered`].
+    sync_blocks_delivered: Arc<AtomicU64>,
+    /// Set when the node cannot progress without an operator. Feeds
+    /// `AlignmentState::Blocked` so the halt is decided once, here, instead of
+    /// being inferred independently by each GUI widget.
+    blocked_reason: Option<String>,
 
     // ── Fork state ──
     fork_visible: bool,
@@ -425,7 +441,7 @@ pub struct HealingManager<S: StorageEngine + Send + Sync + 'static> {
 }
 
 impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
-    /// Create a new HealingManager with default (pre-genesis) state.
+    /// Create a new HealingManager with default (no chain yet) state.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         storage: Arc<TrackedRwLock<S>>,
@@ -440,6 +456,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         sync_target_height_shared: Arc<AtomicU64>,
         sync_progress_current: Arc<AtomicU64>,
         sync_progress_total: Arc<AtomicU64>,
+        integrity_failed: Arc<AtomicBool>,
         fork_resolution_strategy: ForkResolutionStrategy,
         fork_resolution_delay_cycles: u32,
     ) -> Self {
@@ -452,6 +469,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             sync_target_height_shared,
             sync_progress_current,
             sync_progress_total,
+            integrity_failed,
+            sync_blocks_delivered: Arc::new(AtomicU64::new(0)),
+            blocked_reason: None,
             fork_visible: false,
             fork_common_ancestor: None,
             healing_phase: HealingPhase::Idle,
@@ -624,6 +644,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     pub fn sync_progress_total(&self) -> &Arc<AtomicU64> { &self.sync_progress_total }
     pub fn alignment(&self) -> &Arc<RwLock<AlignmentSnapshot>> { &self.alignment }
 
+    /// Shared L11 integrity halt. Exposed so `Node` and tests observe the same
+    /// flag that forces [`AlignmentState::Blocked`].
+    pub fn integrity_failed(&self) -> &Arc<AtomicBool> { &self.integrity_failed }
+
     /// Returns true if we are in the Fetching state and this height is in the manifest.
     pub fn is_sync_block(&self, height: u64) -> bool {
         if let SyncState::Fetching { ref manifest, .. } = self.sync_state {
@@ -791,6 +815,25 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
         let progress = if highest_known == 0 { 0.0 } else { height as f64 / highest_known as f64 };
 
+        // A blocked node is blocked regardless of what the peer topology
+        // would otherwise imply — an operator-halted node must never render as
+        // "Syncing" or "Creating". Integrity halt is authoritative even if
+        // `blocked_reason` was not set locally (it is shared with `Node`).
+        let blocked_reason = if self.integrity_failed.load(Ordering::Relaxed) {
+            Some(
+                self.blocked_reason.clone().unwrap_or_else(|| {
+                    "Chain integrity failure — node halted read-only".to_string()
+                }),
+            )
+        } else {
+            self.blocked_reason.clone()
+        };
+        let state = if blocked_reason.is_some() {
+            AlignmentState::Blocked
+        } else {
+            state
+        };
+
         let snapshot = AlignmentSnapshot {
             state,
             height,
@@ -798,6 +841,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             highest_known,
             progress,
             cycles_remaining,
+            blocked_reason: blocked_reason.clone(),
         };
 
         // 7. Detect state or height change and emit WS event.
@@ -815,6 +859,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 "progress": progress,
                 "cycles_remaining": cycles_remaining,
                 "previous_state": prev.state.label(),
+                // Carried on the event as well as the RPC so a client that is
+                // already connected learns *why* without a second round trip.
+                "blocked_reason": blocked_reason,
             }));
         }
     }
@@ -918,7 +965,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         self.consensus.write().set_chain_id(new_cid);
         self.send_network(NetworkCommand::UpdateChainId(new_cid));
         // tx_ids commit to the chain_id, so every pooled entry's identity is
-        // now stale (blockchain hop, or pre-genesis→real transition). Purge.
+        // now stale (blockchain hop, or uninitialized→real transition). Purge.
         self.mempool.lock().clear();
         tracing::info!(task = "chain_id", "chain_id updated to {:#010X}", new_cid);
     }
@@ -1330,9 +1377,15 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                                             entry_height, retry_count, stalled_secs,
                                         ),
                                     });
-                                    // Mark as failed so the conveyor switches peer.
+                                    // Mark as stalled so the conveyor switches
+                                    // peer. NOT `Failed { attempts: MAX }` —
+                                    // that made a peer which never answered
+                                    // report as "failed 5 times", conflating
+                                    // "no block ever arrived" with "we rejected
+                                    // it five times". Different causes, and
+                                    // only one of them is the peer's fault.
                                     if let SyncState::Fetching { ref mut manifest, .. } = self.sync_state {
-                                        manifest[cursor].status = EntryStatus::Failed { attempts: SYNC_MAX_BLOCK_RETRIES };
+                                        manifest[cursor].status = EntryStatus::Stalled { retries: retry_count };
                                     }
                                 } else {
                                     tracing::warn!(
@@ -1370,21 +1423,41 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                                 }
                             }
                         }
+                        EntryStatus::Stalled { retries } => {
+                            // The peer never delivered this block. Say exactly
+                            // that — the old code reported it as N validation
+                            // failures, sending operators to look at a block
+                            // they had never received.
+                            let stalled_h = manifest[cursor].height;
+                            tracing::warn!(
+                                task = "sync",
+                                "block {} never delivered after {} retries — ingesting sync stall clue",
+                                stalled_h, retries,
+                            );
+                            self.ingest_clue(HealingClue::SyncStall {
+                                stalled_height: stalled_h,
+                                target_height: target,
+                                reason: format!(
+                                    "block {stalled_h} not delivered by peer after {retries} retries"
+                                ),
+                            });
+                            self.reset_sync_idle();
+                        }
                         EntryStatus::Failed { attempts } if attempts >= SYNC_MAX_BLOCK_RETRIES => {
-                            // Too many failures — ingest SyncStall clue so
+                            // Too many rejections — ingest SyncStall clue so
                             // evaluate_and_execute can trigger fork resolution
                             // instead of endlessly restarting sync.
                             let stalled_h = manifest[cursor].height;
                             tracing::warn!(
                                 task = "sync",
-                                "block {} failed {} times — ingesting sync stall clue",
+                                "block {} rejected {} times — ingesting sync stall clue",
                                 stalled_h, attempts,
                             );
                             self.ingest_clue(HealingClue::SyncStall {
                                 stalled_height: stalled_h,
                                 target_height: target,
                                 reason: format!(
-                                    "block {stalled_h} failed {attempts} times, sync cannot advance"
+                                    "block {stalled_h} rejected {attempts} times, sync cannot advance"
                                 ),
                             });
                             self.reset_sync_idle();
@@ -1654,6 +1727,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                     SyncImportResult::Accepted { .. } => {
                         manifest[*cursor].status = EntryStatus::Done;
                         *cursor += 1;
+                        // Importing a block is proof the blocking condition is
+                        // gone. Cleared here rather than in `reset_sync_idle`,
+                        // which the blocking paths themselves call.
+                        self.blocked_reason = None;
 
                         // Update progress atomics.
                         let current = height;
@@ -1674,15 +1751,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                             "progress": pct,
                         }));
                     }
-                    SyncImportResult::Rejected { reason } => {
-                        // Bootstrap fork detection: if the rejection is a chain
-                        // disagreement (PrevHashMismatch) and we're early in the chain,
-                        // we're on a different fork than the sync peer.  Reset to
-                        // genesis and re-sync from the dominant chain.
-                        let is_fork_reject = reason.contains("PrevHash")
-                            || reason.contains("prev_block_hash")
-                            || reason.contains("HeightMismatch");
-                        if is_fork_reject {
+                    SyncImportResult::Rejected { reason, kind } => match kind {
+                        // Chain disagreement: we're on a different fork than the
+                        // sync peer. Fork resolution decides, retrying cannot.
+                        RejectKind::ChainMismatch => {
                             let sync_target = target;
                             tracing::warn!(
                                 task = "sync",
@@ -1697,17 +1769,44 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                             // Pause conveyor — evaluate_and_execute will decide.
                             return;
                         }
-                        let attempts = match manifest[*cursor].status {
-                            EntryStatus::Failed { attempts } => attempts + 1,
-                            _ => 1,
-                        };
-                        tracing::warn!(
-                            task = "sync",
-                            "sync block {} rejected (attempt {}): {reason}",
-                            height, attempts,
-                        );
-                        manifest[*cursor].status = EntryStatus::Failed { attempts };
-                    }
+                        // No genesis: no peer and no number of retries can fix
+                        // this, so don't burn attempts pretending otherwise.
+                        // Stop the conveyor and tell the operator what to do.
+                        RejectKind::NoGenesis => {
+                            tracing::error!(
+                                task = "sync",
+                                "cannot sync: this node has no genesis block, so the chain's first block \
+                                 cannot be anchored. Set [chain] genesis_seed in noble.toml \
+                                 to the seed used by this chain (`noble-tool genesis --seed \
+                                 <SEED>` prints the resulting chain ID), then restart."
+                            );
+                            self.blocked_reason = Some(
+                                "Sync blocked — no genesis block. Set [chain] genesis_seed \
+                                 in noble.toml and restart."
+                                    .to_string(),
+                            );
+                            self.broadcast_event(serde_json::json!({
+                                "event": "sync_blocked",
+                                "height": height,
+                                "reason": "no genesis block configured",
+                                "message": "Sync blocked — set [chain] genesis_seed and restart",
+                            }));
+                            self.reset_sync_idle();
+                            return;
+                        }
+                        RejectKind::Invalid => {
+                            let attempts = match manifest[*cursor].status {
+                                EntryStatus::Failed { attempts } => attempts + 1,
+                                _ => 1,
+                            };
+                            tracing::warn!(
+                                task = "sync",
+                                "sync block {} rejected (attempt {}): {reason}",
+                                height, attempts,
+                            );
+                            manifest[*cursor].status = EntryStatus::Failed { attempts };
+                        }
+                    },
                 }
             }
         }
@@ -2076,6 +2175,33 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
     // ── PeerChainTipUpdated handler ──
 
+    /// Scan downward from `from_height` for the highest height whose block is
+    /// actually readable, i.e. the deepest point the chain is still intact.
+    ///
+    /// Returns `None` when nothing below `from_height` is readable, which
+    /// means there is no prefix worth keeping and the caller must halt rather
+    /// than rewind. Height 0 is included in the scan: genesis is a legitimate
+    /// rewind target, and a chain whose genesis is unreadable is exactly the
+    /// unrepairable case.
+    ///
+    /// Bounded by [`MAX_REORG_DEPTH`] — damage deeper than a legal reorg is
+    /// not something automation should silently rewind past.
+    fn highest_intact_height(&self, from_height: u64) -> Option<u64> {
+        let floor = from_height.saturating_sub(noble_core::MAX_REORG_DEPTH);
+        let storage = self.storage.read();
+        for h in (floor..from_height).rev() {
+            let readable = storage
+                .get_block_hash_by_height(h)
+                .ok()
+                .filter(|hash| storage.get_block_header(hash).is_ok())
+                .is_some();
+            if readable {
+                return Some(h);
+            }
+        }
+        None
+    }
+
     /// Handle a peer reporting its chain tip. Performs integrity probe,
     /// then delegates sync decisions to `advance_sync`.
     pub fn on_peer_chain_tip_updated(&mut self, _peer_id: &[u8], peer_height: u64) {
@@ -2096,38 +2222,104 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             true
         };
 
-        // Chain integrity probe: if our tip block is missing from storage, wipe.
+        // Chain integrity probe: our tip claims a block that storage doesn't
+        // have. Repair by rewinding to the highest intact height; if there is
+        // no intact prefix, halt read-only and wait for an operator.
+        //
+        // This used to call `wipe_and_reset` unconditionally. On 2026-08-11
+        // that destroyed a healthy 196-block chain and its chain_id: a failed
+        // rollback (see the storage preflights) left the tip dangling, this
+        // probe saw the inconsistency one tick later, and answered by deleting
+        // everything. Damage localized to the last few blocks does not justify
+        // discarding the whole chain, and losing chain_id makes the node
+        // unable to rejoin the chain it was already on.
         if our_height > 0 && !tip_block_exists {
             tracing::error!(
                 task = "integrity",
-                "CHAIN INTEGRITY FAILURE: tip at height {} claims hash {} but block missing from storage — wiping and re-syncing",
+                "CHAIN INTEGRITY FAILURE: tip at height {} claims hash {} but block missing from storage",
                 our_height,
                 hex::encode(our_tip_hash.as_bytes()),
             );
-            self.wipe_and_reset("integrity probe: tip block missing from storage");
 
-            self.update_chain_id(0);
-            if let Err(e) = self.consensus.write().reset_tip(0, Hash256::ZERO, true) {
-                tracing::error!(task = "integrity", "reset_tip after integrity wipe failed: {e}");
+            match self.highest_intact_height(our_height) {
+                Some(intact) => {
+                    tracing::warn!(
+                        task = "integrity",
+                        "repairing: rewinding {} damaged block(s) to intact height {}",
+                        our_height.saturating_sub(intact),
+                        intact,
+                    );
+                    let chain_id = self.get_chain_id();
+                    let rewound = self
+                        .storage
+                        .read()
+                        .rollback_to_height(intact, chain_id);
+                    match rewound {
+                        Ok(tip) => {
+                            if let Err(e) =
+                                self.consensus.write().reset_tip(tip.height, tip.block_hash, true)
+                            {
+                                tracing::error!(
+                                    task = "integrity",
+                                    "reset_tip after integrity repair failed: {e}"
+                                );
+                            }
+                            self.update_tip_height(tip.height);
+                            self.clear_pending_proposals();
+                            self.fork_common_ancestor = None;
+                            self.reset_sync_idle();
+                            self.sync_verify_retries = 0;
+                            self.sync_start_height = 0;
+                            self.blocked_reason = None;
+                            self.broadcast_event(serde_json::json!({
+                                "event": "integrity_repaired",
+                                "from_height": our_height,
+                                "to_height": tip.height,
+                            }));
+                            // Chain is consistent again — resume normal sync.
+                            self.request_sync();
+                            return;
+                        }
+                        Err(e) => {
+                            // The rollback refused (it preflights now), so the
+                            // chain is untouched. Fall through to the halt.
+                            tracing::error!(
+                                task = "integrity",
+                                "integrity repair to height {intact} refused: {e}"
+                            );
+                        }
+                    }
+                }
+                None => {
+                    tracing::error!(
+                        task = "integrity",
+                        "no intact prefix found below height {our_height}"
+                    );
+                }
             }
-            self.update_tip_height(0);
+
+            // Unrepairable. Halt read-only rather than destroy: reads and RPC
+            // keep serving so an operator can diagnose, proposals are
+            // suppressed, and chain data + chain_id are left untouched. A
+            // deliberate wipe remains available via the TOTP-gated manual RPC.
+            self.integrity_failed.store(true, Ordering::Relaxed);
+            self.blocked_reason = Some(format!(
+                "Chain integrity failure at height {our_height} — node halted read-only, \
+                 chain data preserved. Operator action required."
+            ));
+            tracing::error!(
+                task = "integrity",
+                "node HALTED read-only — chain data preserved, block proposals suppressed. \
+                 Operator action required (manual reset is available via authenticated RPC)."
+            );
+            self.broadcast_event(serde_json::json!({
+                "event": "integrity_failure",
+                "height": our_height,
+                "proposals_suppressed": true,
+                "message": "Chain integrity failure — node halted read-only, operator action required",
+            }));
             self.clear_pending_proposals();
-            self.clear_gossip_caches();
-
-            // Clear stale caches that reference the wiped chain (stale-cache-#4/#5/#7).
-            self.announce_cache.lock().clear();
-            self.discovered_blockchains.lock().clear();
-            self.persist_discovered_blockchains();
-            self.fork_common_ancestor = None;
-
-            // Reset sync state + post-sync verification counters
-            // (prevent retry bleed from previous healing case).
             self.reset_sync_idle();
-            self.sync_verify_retries = 0;
-            self.sync_start_height = 0;
-
-            // Request fresh sync from any available peer.
-            self.request_sync();
             return;
         }
 
@@ -2282,12 +2474,42 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     /// Called ONLY from `evaluate_and_execute`. Phase transitions are handled
     /// by the caller.
     fn execute_adoption(&mut self, target_chain_id: u32, reason: &str) {
-        tracing::warn!(
+        // Adopting another chain means destroying our genesis — the foundation
+        // this node has been validating against. Automation does not get to do
+        // that. Per ADR-031 the node halts and an operator decides; switching
+        // chains is a deliberate act (wipe the data dir and restart), not a
+        // conclusion reached from peer-reported heights.
+        //
+        // The old automatic path also wiped BEFORE validating the adopted
+        // chain (the M5 residual), so a node could destroy a good chain and
+        // then fail to obtain the one it destroyed it for.
+        tracing::error!(
             task = "chain_adoption",
-            "CROSS-CHAIN ADOPTION: adopting chain {:#010X} — {reason}",
+            "REFUSING automatic cross-chain adoption of {:#010X} — {reason}. \
+             Adopting another chain would destroy this chain's genesis. Chain data \
+             is preserved and block proposals are suppressed; switching chains is an \
+             operator action (stop the node, wipe the data dir, restart).",
             target_chain_id
         );
+        self.integrity_failed.store(true, Ordering::Relaxed);
+        self.blocked_reason = Some(format!(
+            "Refused automatic adoption of chain {target_chain_id:#010X} — operator action \
+             required. Chain data preserved."
+        ));
+        self.broadcast_event(serde_json::json!({
+            "event": "adoption_refused",
+            "target_chain_id": target_chain_id,
+            "reason": reason,
+            "message": "Refused to adopt another chain — operator action required",
+        }));
+        self.clear_pending_proposals();
+        self.reset_sync_idle();
+    }
 
+    /// Unused remnant of the automatic adoption path, kept only so the
+    /// deliberate operator route (manual reset RPC) still has a wipe to call.
+    #[allow(dead_code)]
+    fn execute_adoption_unused(&mut self, target_chain_id: u32, reason: &str) {
         // 1. Wipe ALL chain data.
         self.wipe_and_reset(reason);
 
@@ -2668,30 +2890,40 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     /// Reads parent header and validator list from its own subsystem references.
     /// Executes all side-effects directly (storage commit, consensus update,
     /// mempool eviction, network commands, broadcast events).
+    /// Count of blocks a peer has actually handed us for import, accepted or
+    /// not. Distinct from sync *progress*, which only counts accepted blocks.
+    ///
+    /// The proposal gate needs both: a peer that advertises height 197 and
+    /// delivers nothing may be lying, but a peer that delivers blocks we
+    /// reject has substantiated that its chain exists. Treating the second
+    /// case as "unsubstantiated" is what let a node that could not sync start
+    /// minting a rival chain.
+    pub fn sync_blocks_delivered(&self) -> &Arc<AtomicU64> {
+        &self.sync_blocks_delivered
+    }
+
     pub fn try_sync_import(&self, block: &noble_core::Block, vote_data: Option<&[u8]>) -> SyncImportResult {
+        self.sync_blocks_delivered.fetch_add(1, Ordering::Relaxed);
         let (tip_height, _) = self.consensus.read().chain_tip();
         let mut chain_id = self.get_chain_id();
 
-        // Block 1 is ALWAYS proposed with chain_id = 0 (the node has no chain
-        // identity yet at proposal time). After block 1 commits, the real
-        // chain_id is derived from block 1's hash. So:
-        //   - Block 1 validation: MUST use chain_id = 0 (matching the proposer)
-        //   - Block 2+: use the derived chain_id from storage
+        // Genesis is the one block that cannot commit to its own chain id:
+        // the id is derived from the genesis hash, and the hash covers the
+        // transactions, whose ids would have to embed the id. That circularity
+        // is inherent to founding a chain, not an artefact of numbering — so
+        // genesis is produced and validated with chain_id = 0, and every block
+        // after it uses the id derived from genesis.
         //
         // Getting this wrong causes merkle root mismatches: the proposer
         // computed tx_ids with chain_id=0, but the validator recomputes with
         // the derived chain_id → different preimage → different merkle → B4.
-        if block.header.height == 1 {
-            // Block 1 was proposed with chain_id = 0, always validate with 0.
+        if block.header.height == noble_core::GENESIS_HEIGHT {
             chain_id = 0;
-        } else if chain_id == 0 && block.header.height > 1 {
-            // For blocks > 1 when we don't have a chain_id yet (post-reset),
-            // derive it from the stored block 1 hash.
+        } else if chain_id == 0 {
+            // Post-reset: recover the id from the genesis block we hold.
             let storage = self.storage.read();
-            if let Ok(block1_hash) = storage.get_block_hash_by_height(1) {
-                chain_id = noble_core::derive_chain_id(&block1_hash);
-            } else if let Ok(genesis_hash) = storage.get_block_hash_by_height(0) {
-                chain_id = noble_core::derive_chain_id(&genesis_hash);
+            if let Ok(Some(g)) = storage.genesis() {
+                chain_id = noble_core::derive_chain_id(&g.block_hash);
             }
             if chain_id == 0 {
                 tracing::error!(
@@ -2699,9 +2931,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                     height = block.header.height,
                     "could not derive chain_id — rejecting sync import",
                 );
-                return SyncImportResult::Rejected {
-                    reason: "could not derive chain_id from storage".to_string(),
-                };
+                return SyncImportResult::reject(
+                    RejectKind::Invalid,
+                    "could not derive chain_id from storage",
+                );
             }
         }
 
@@ -2712,18 +2945,18 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 Ok(Some(t)) => t,
                 Ok(None) => {
                     tracing::error!(task = "sync_import", "chain tip missing at height {tip_height} — aborting");
-                    return SyncImportResult::Rejected { reason: "chain tip missing".to_string() };
+                    return SyncImportResult::reject(RejectKind::Invalid, "chain tip missing");
                 }
                 Err(e) => {
                     tracing::error!(task = "sync_import", "failed to load chain tip: {e}");
-                    return SyncImportResult::Rejected { reason: format!("chain tip error: {e}") };
+                    return SyncImportResult::reject(RejectKind::Invalid, format!("chain tip error: {e}"));
                 }
             };
             match storage.get_block_header(&chain_tip.block_hash) {
                 Ok(header) => Some(header),
                 Err(e) => {
                     tracing::error!(task = "sync_import", "failed to load parent header: {e}");
-                    return SyncImportResult::Rejected { reason: format!("parent header error: {e}") };
+                    return SyncImportResult::reject(RejectKind::ChainMismatch, format!("parent header error: {e}"));
                 }
             }
         } else {
@@ -2738,37 +2971,41 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         // which is the long-range / false-history attack fork-prevention
         // Layer 3 names. The anchor is per-deployment and already on disk: our
         // own genesis block. No shipped checkpoint set, no release authority.
-        if block.header.height == 1 {
-            let genesis_hash = {
+        if block.header.height == noble_core::GENESIS_HEIGHT {
+            // Genesis has no parent to chain to — nothing precedes it. So the
+            // check is identity, not descent: if we already have a genesis, an
+            // incoming one must BE it. Two different foundations are two
+            // different chains.
+            let ours = {
                 let storage = self.storage.read();
-                storage.get_block_hash_by_height(0).ok()
+                storage.genesis().ok().flatten()
             };
-            match genesis_hash {
-                Some(expected) => {
-                    if block.header.prev_block_hash != expected {
-                        tracing::warn!(
-                            task = "sync_import",
-                            "rejecting block 1: prev_block_hash {} does not descend from our genesis {}",
-                            block.header.prev_block_hash,
-                            expected
-                        );
-                        return SyncImportResult::Rejected {
-                            reason: "block 1 does not descend from the configured genesis".to_string(),
-                        };
+            if let Some(g) = ours {
+                let incoming = match block.header.compute_block_hash() {
+                    Ok(h) => h,
+                    Err(e) => {
+                        return SyncImportResult::reject(
+                            RejectKind::Invalid,
+                            format!("genesis hash computation failed: {e}"),
+                        )
                     }
-                }
-                None => {
-                    // No genesis on disk: we have nothing to anchor against, so
-                    // there is no safe way to accept someone else's origin.
+                };
+                if incoming != g.block_hash {
                     tracing::warn!(
                         task = "sync_import",
-                        "rejecting block 1: no local genesis to anchor against"
+                        "rejecting genesis {incoming}: we are on the chain founded by {}",
+                        g.block_hash
                     );
-                    return SyncImportResult::Rejected {
-                        reason: "no local genesis block to anchor block 1 against".to_string(),
-                    };
+                    return SyncImportResult::reject(
+                        RejectKind::ChainMismatch,
+                        "genesis differs from ours — this peer is on another chain",
+                    );
                 }
             }
+            // No chain yet: this genesis is accepted on its Dual-Witness
+            // certificate, verified below with every other block rule. That
+            // certificate is the anchor an open network has; nothing is
+            // configured out of band.
         }
 
         let validator_list = self.consensus.read().validator_snapshot()
@@ -2822,18 +3059,14 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                     block.header.height
                 );
             }
-            return SyncImportResult::Rejected {
-                reason: format!("{e}"),
-            };
+            return SyncImportResult::reject(RejectKind::Invalid, format!("{e}"));
         }
 
         let block_hash = match block.header.compute_block_hash() {
             Ok(h) => h,
             Err(e) => {
                 tracing::warn!(task = "sync_import", "block hash computation failed: {e}");
-                return SyncImportResult::Rejected {
-                    reason: format!("block hash computation failed: {e}"),
-                };
+                return SyncImportResult::reject(RejectKind::Invalid, format!("block hash computation failed: {e}"));
             }
         };
 
@@ -2852,9 +3085,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             Ok(ids) => ids,
             Err(e) => {
                 tracing::warn!(task = "sync_import", "tx_id computation failed: {e}");
-                return SyncImportResult::Rejected {
-                    reason: format!("tx_id computation failed: {e}"),
-                };
+                return SyncImportResult::reject(RejectKind::Invalid, format!("tx_id computation failed: {e}"));
             }
         };
 
@@ -2884,7 +3115,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             let storage = self.storage.read();
             if let Err(e) = storage.commit_block(block, &block_hash, &tx_ids) {
                 tracing::error!(task = "sync_import", "failed to commit sync block {}: {e}", block.header.height);
-                return SyncImportResult::Rejected { reason: format!("commit failed: {e}") };
+                return SyncImportResult::reject(RejectKind::Invalid, format!("commit failed: {e}"));
             }
         }
 
@@ -3056,16 +3287,21 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 /// Check for inconsistent state at startup: chain_tip says height > 0 but
 /// chain_id is 0 (blocks missing from storage). Returns true if corrupt.
 pub fn startup_integrity_check(chain_id: u32, tip_height: u64) -> bool {
-    if chain_id == 0 && tip_height > 0 {
-        tracing::warn!(
+    // A tip above genesis with no chain id means genesis is unreadable, so the
+    // id could not be derived. That is a corruption signal, and per ADR-031 the
+    // answer is to halt for an operator — never to wipe. This function used to
+    // return `true` here meaning "wipe inconsistent state", which is how a
+    // 196-block chain was deleted; it now only reports.
+    if chain_id == 0 && tip_height > noble_core::GENESIS_HEIGHT {
+        tracing::error!(
             task = "startup",
-            "chain_tip at height {} but chain_id=0 (blocks missing from storage) — wiping inconsistent state",
+            "chain tip at height {} but no chain id could be derived — genesis is \
+             unreadable. Chain data is preserved; block proposals are suppressed.",
             tip_height,
         );
-        true
-    } else {
-        false
+        return true;
     }
+    false
 }
 
 /// Result of a sync import attempt.
@@ -3075,7 +3311,32 @@ pub enum SyncImportResult {
         new_chain_id: Option<u32>,
     },
     /// Block was rejected (validation failure).
-    Rejected { reason: String },
+    Rejected { reason: String, kind: RejectKind },
+}
+
+/// Why a synced block was rejected, as a value rather than a message.
+///
+/// The conveyor used to classify rejections by substring-matching the reason
+/// text (`reason.contains("PrevHash")`), so a rejection whose wording didn't
+/// happen to contain the expected fragment was misrouted into the retry path
+/// and burned all five attempts on something retrying could never fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectKind {
+    /// The block doesn't chain to what we have — a genuine fork/origin
+    /// disagreement that fork resolution must decide, not a retry.
+    ChainMismatch,
+    /// We have no genesis block, so the chain's origin cannot be anchored. Retrying
+    /// cannot help; the operator must configure `[chain] genesis_seed`.
+    NoGenesis,
+    /// Ordinary validation failure — retrying a different peer may succeed.
+    Invalid,
+}
+
+impl SyncImportResult {
+    /// Reject with an explicit kind.
+    pub fn reject(kind: RejectKind, reason: impl Into<String>) -> Self {
+        Self::Rejected { reason: reason.into(), kind }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3224,16 +3485,21 @@ fn decide_alignment(
     dwell_active: impl FnOnce() -> bool,
     majority: impl FnOnce() -> (usize, usize),
 ) -> AlignmentState {
-    if height == 0 && connected_peers == 0 {
+    // Order matters. `Syncing` used to sit *below* the `height == 0` arms, so
+    // it was unreachable for a node at height 0 — a blank node facing a peer
+    // 197 blocks ahead reported `Creating`, i.e. "forming a new chain", while
+    // the sync banner simultaneously said "catching up to 197". Being far
+    // behind a known chain is a property of the gap, not of our own height, so
+    // it is tested first and the height-0 arms now describe only the case they
+    // were meant for: a chain that genuinely has no peer ahead of it.
+    if connected_peers == 0 {
         AlignmentState::Isolated
+    } else if highest_known.saturating_sub(height) > ALIGNMENT_SYNC_GAP_BLOCKS {
+        AlignmentState::Syncing
     } else if height == 0 && !has_proposals {
         AlignmentState::Bootstrapping
     } else if height == 0 {
         AlignmentState::Creating
-    } else if connected_peers == 0 {
-        AlignmentState::Isolated
-    } else if highest_known.saturating_sub(height) > ALIGNMENT_SYNC_GAP_BLOCKS {
-        AlignmentState::Syncing
     } else if peers_with_tip == 0 {
         // Connected peers but none have announced chain tips yet. Evidence-free
         // is NOT aligned — report Verifying until at least one tip arrives.
@@ -3306,6 +3572,104 @@ mod tests {
         assert_eq!(
             decide_alignment(0, 2, 0, 0, true, unreachable_dwell, unreachable_maj),
             AlignmentState::Creating
+        );
+    }
+
+    #[test]
+    fn integrity_halt_forces_blocked_and_outranks_the_topology_state() {
+        let mut h = make_healing_manager();
+
+        // Baseline: no peers, height 0 — the topology says Isolated.
+        h.compute_alignment();
+        let before = h.alignment().read().clone();
+        assert_ne!(before.state, AlignmentState::Blocked);
+        assert!(before.blocked_reason.is_none());
+
+        // The startup integrity check sets this shared flag on `Node`; healing
+        // must honour it even though it set no local reason of its own.
+        h.integrity_failed().store(true, Ordering::Relaxed);
+        h.compute_alignment();
+        let after = h.alignment().read().clone();
+        assert_eq!(
+            after.state,
+            AlignmentState::Blocked,
+            "a halted node must report Blocked regardless of peer topology"
+        );
+        assert!(
+            after.blocked_reason.is_some(),
+            "Blocked must always carry an operator-facing reason"
+        );
+        assert_eq!(after.state.severity(), "high");
+    }
+
+    #[test]
+    fn highest_intact_height_finds_the_rewind_target_and_reports_none_when_unrepairable() {
+        let h = make_healing_manager();
+
+        // Empty storage: nothing readable below the claimed tip, so there is
+        // no prefix to keep and the caller must halt rather than rewind.
+        assert_eq!(
+            h.highest_intact_height(10),
+            None,
+            "no readable block below the tip must report unrepairable, not height 0"
+        );
+
+        // Commit a short chain, then claim a tip beyond it: the scan must land
+        // on the highest block that actually exists rather than give up and
+        // let the caller wipe.
+        let validator = noble_test_utils::fixtures::TestKeypair::generate();
+        let mut last = Hash256::ZERO;
+        for height in 0..=3u64 {
+            let (block, hash, ids) = noble_test_utils::fixtures::make_block_with_coinbase(
+                vec![],
+                height,
+                last,
+                noble_core::GENESIS_TIMESTAMP + height * 960,
+                &validator,
+                &[],
+            );
+            h.storage
+                .read()
+                .commit_block(&block, &hash, &ids)
+                .expect("fixture block should commit");
+            last = hash;
+        }
+        assert_eq!(
+            h.highest_intact_height(7),
+            Some(3),
+            "must rewind to the deepest intact block, not wipe the chain"
+        );
+    }
+
+    #[test]
+    fn alignment_blank_node_behind_a_peer_is_syncing_not_creating() {
+        // Regression, 2026-08-11: `Syncing` sat below the `height == 0` arms
+        // and was therefore unreachable at height 0. A blank node facing a
+        // peer 197 blocks ahead reported `Creating` — "forming a new chain" —
+        // while the sync banner said "catching up to 197". Both were rendered
+        // at once, and the node really was trying to do both.
+        assert_eq!(
+            decide_alignment(0, 1, 1, 197, true, unreachable_dwell, unreachable_maj),
+            AlignmentState::Syncing
+        );
+        // Also with no proposals seen: still joining, not bootstrapping.
+        assert_eq!(
+            decide_alignment(0, 1, 1, 197, false, unreachable_dwell, unreachable_maj),
+            AlignmentState::Syncing
+        );
+    }
+
+    #[test]
+    fn alignment_height_zero_still_forms_a_chain_when_no_peer_is_ahead() {
+        // The Syncing reorder must not swallow genuine chain formation: peers
+        // present, nobody ahead, so this really is a chain being created.
+        assert_eq!(
+            decide_alignment(0, 2, 2, 0, true, unreachable_dwell, unreachable_maj),
+            AlignmentState::Creating
+        );
+        assert_eq!(
+            decide_alignment(0, 2, 2, 0, false, unreachable_dwell, unreachable_maj),
+            AlignmentState::Bootstrapping
         );
     }
 
@@ -3393,6 +3757,7 @@ mod tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(false)),
             ForkResolutionStrategy::LongestMostLegitimate,
             3,
         )
@@ -3717,28 +4082,42 @@ mod tests {
     }
 
     #[test]
-    fn chain_adoption_via_clue_resets_state() {
+    fn chain_adoption_is_refused_and_preserves_the_chain() {
+        // Adopting another chain destroys this chain's genesis. Automation does
+        // not get to make that call: the node halts and preserves its data.
+        // This test previously asserted the opposite (that adoption wiped and
+        // reset), which is the behaviour that cost a 196-block chain.
         let mut hm = make_healing_manager();
         hm.sync_state = SyncState::AwaitingManifest {
             peer: vec![1, 2, 3],
             target: 10,
             requested_at: 50,
         };
-        hm.fork_visible = true;
         hm.fork_common_ancestor = Some((5, [0xAA; 32]));
         hm.chain_vote_weight.store(100, Ordering::Relaxed);
-        // Ingest adoption clue and evaluate.
+
         hm.ingest_clue(HealingClue::CrossChainAdopt {
             target_chain_id: 0xDEADBEEF,
             reason: "test".into(),
         });
         hm.evaluate_and_execute();
+
+        // Halted, with a reason an operator can act on.
+        assert!(
+            hm.integrity_failed.load(Ordering::Relaxed),
+            "refusing adoption must halt the node"
+        );
+        assert!(
+            hm.blocked_reason.is_some(),
+            "refusal must carry an operator-facing reason"
+        );
+        // And nothing was destroyed: the chain's own weight is untouched.
+        assert_eq!(
+            hm.chain_vote_weight.load(Ordering::Relaxed),
+            100,
+            "refused adoption must not reset chain state"
+        );
         assert!(matches!(hm.sync_state, SyncState::Idle));
-        assert!(!hm.fork_visible);
-        assert!(hm.fork_common_ancestor.is_none());
-        assert_eq!(hm.chain_vote_weight.load(Ordering::Relaxed), 0);
-        // After evaluate_and_execute, phase should be Syncing (post-adoption).
-        assert_eq!(hm.healing_phase, HealingPhase::Syncing);
     }
 
     #[test]

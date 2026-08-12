@@ -234,8 +234,13 @@ class Noble < Formula
         Config:    #{etc}/noble/noble.toml
         Data:      #{var}/noble/data
         Keystore:  #{var}/noble/keystore
-        Logs:      #{var}/log/noble-node.log
+        Logs:      #{var}/log/noble-node.log  (rotating, size-capped)
+                   #{var}/log/noble-startup.log  (launchd capture, boot only)
         GUI:       #{prefix}/noble-gui/
+
+      The node logs to the path in [logging] file_path; if that key is absent
+      the log lands in the data dir instead. The node prints its effective log
+      path at startup — trust that line over this one.
     EOS
   end
 

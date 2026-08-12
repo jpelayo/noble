@@ -138,6 +138,12 @@ pub struct TraceHandle {
     /// cap without a restart (the writer reads it on each rotation check).
     /// `0` = file logging disabled / not configured.
     log_max_size: Arc<std::sync::atomic::AtomicU64>,
+    /// Absolute path the rotating log actually writes to, and how many files
+    /// it keeps. Reported over RPC because the effective path depends on
+    /// `[logging] file_path` and falls back to the data dir — operators were
+    /// otherwise left guessing, or tailing a stale file from an older layout.
+    log_file_path: Option<String>,
+    log_max_files: usize,
 }
 
 impl TraceHandle {
@@ -148,6 +154,8 @@ impl TraceHandle {
         default_filter: String,
         set_filter_fn: SetFilterFn,
         log_max_size: Arc<std::sync::atomic::AtomicU64>,
+        log_file_path: Option<String>,
+        log_max_files: usize,
     ) -> Self {
         let current = default_filter.clone();
         Self {
@@ -160,7 +168,19 @@ impl TraceHandle {
                 current_filter: parking_lot::RwLock::new(current),
             }),
             log_max_size,
+            log_file_path,
+            log_max_files,
         }
+    }
+
+    /// Absolute path the rotating log writes to, if file logging is configured.
+    pub fn log_file_path(&self) -> Option<&str> {
+        self.log_file_path.as_deref()
+    }
+
+    /// Number of rotating log files kept (active + rotated).
+    pub fn log_max_files(&self) -> usize {
+        self.log_max_files
     }
 
     /// Current maximum total log size in bytes (0 = file logging disabled).

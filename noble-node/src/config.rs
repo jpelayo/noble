@@ -427,7 +427,10 @@ pub struct TraceConfig {
     #[serde(default = "default_initial_filter")]
     pub initial_filter: String,
     /// Whether to also output traces to stderr (for development).
-    #[serde(default)]
+    ///
+    /// Defaults to whether stderr is a terminal — see
+    /// [`default_stderr_enabled`]. Set explicitly to override.
+    #[serde(default = "default_stderr_enabled")]
     pub stderr_enabled: bool,
 }
 
@@ -438,12 +441,30 @@ fn default_initial_filter() -> String {
     "info".to_string()
 }
 
+/// Default stderr fan-out: on when attached to a terminal, off otherwise.
+///
+/// The node owns a size-capped rotating log (see [`LoggingConfig`]); stderr is
+/// an additional, *uncapped* stream. Under a service manager it is captured to
+/// a file that nothing rotates — `brew services` sends it to
+/// `var/log/noble-startup.log`, which is documented as holding "a few lines per
+/// boot". With this defaulting to `true`, a node whose `noble.toml` predates
+/// the `[trace]` section fanned every line there instead, and the file grew
+/// unbounded for weeks.
+///
+/// Defaulting to "is anyone actually watching?" fixes already-deployed configs
+/// with no operator edit: interactive `noble-node run` still prints, service
+/// runs stay quiet. An explicit `stderr_enabled` in the TOML always wins.
+fn default_stderr_enabled() -> bool {
+    use std::io::IsTerminal;
+    std::io::stderr().is_terminal()
+}
+
 impl Default for TraceConfig {
     fn default() -> Self {
         Self {
             buffer_capacity: default_buffer_capacity(),
             initial_filter: default_initial_filter(),
-            stderr_enabled: true,
+            stderr_enabled: default_stderr_enabled(),
         }
     }
 }

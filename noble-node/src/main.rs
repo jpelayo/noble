@@ -404,6 +404,24 @@ async fn run_node(config_path: &str, use_memory: bool, pid_file: &str, _daemon: 
     let trace_handle = trace::init_tracing(&trace_config);
 
     tracing::info!("NOBLE node v{}", noble_core::SOFTWARE_VERSION);
+    // Report where logs actually land. The effective path depends on
+    // [logging] file_path and falls back to the data dir, so it is not
+    // necessarily where packaging docs point — say it plainly once per boot
+    // rather than leaving operators to guess (or to tail a stale file).
+    match &trace_config.log_file_path {
+        Some(path) => tracing::info!(
+            "logging to {} (rotating, max {} MiB across {} files); stderr fan-out {}",
+            path.display(),
+            trace_config.log_max_size_bytes / (1024 * 1024),
+            trace_config.log_max_files,
+            if trace_config.stderr_enabled { "ON" } else { "off" },
+        ),
+        None => tracing::warn!(
+            "file logging DISABLED ([logging] file_enabled=false or max_size_bytes=0) — \
+             only the RAM ring buffer and stderr fan-out ({}) are available",
+            if trace_config.stderr_enabled { "ON" } else { "off" },
+        ),
+    }
     tracing::info!("Loading config from {config_path}");
     tracing::info!("Config loaded successfully");
 

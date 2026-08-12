@@ -133,10 +133,18 @@ pub fn parse_hash(hex_str: &str) -> Result<Hash256, ErrorObjectOwned> {
 
 /// Convert a `Block` to a `BlockResponse`.
 pub fn block_to_response(block: &Block, block_hash: &Hash256, chain_id: u32) -> BlockResponse {
-    // Block 1 (genesis) was committed with chain_id=0 because the real chain_id
-    // is derived from block 1's hash AFTER commit.  Use chain_id=0 so the tx_ids
-    // we return match what is stored in CF_TX_INDEX.
-    let effective_chain_id = if block.header.height <= 1 { 0 } else { chain_id };
+    // Genesis is committed with chain_id = 0: the id is derived from the
+    // genesis hash, so genesis cannot commit to it. Use 0 for genesis so the
+    // tx_ids we return match what is stored in CF_TX_INDEX.
+    //
+    // This used to read `height <= 1`, covering both the empty index 0 and the
+    // block that was then genesis. With genesis at its own index the test is
+    // exact — and `<= 1` would now silently mis-report block 1's tx_ids.
+    let effective_chain_id = if block.header.height == noble_core::GENESIS_HEIGHT {
+        0
+    } else {
+        chain_id
+    };
     let txs: Vec<TransactionResponse> = block
         .transactions
         .iter()
@@ -591,7 +599,16 @@ pub struct SyncStatusResponse {
     pub current_height: u64,
     pub highest_known: u64,
     pub progress: f64,
+    /// Authoritative chain phase label, computed once by the node
+    /// (`AlignmentState`). Every GUI surface renders this rather than deriving
+    /// its own answer — three independent derivations is how a node ended up
+    /// showing "CREATING" and "catching up to 197" simultaneously.
     pub state: String,
+    /// Severity class for the state ("zero" | "syncing" | "medium" | "high").
+    pub severity: String,
+    /// Why the node is blocked, when `state == "Blocked"`. Carried with the
+    /// state so a page opened after the event still shows the reason.
+    pub blocked_reason: Option<String>,
 }
 
 /// A persistent peer record returned by `noble_getPeerMemory`.
@@ -818,7 +835,7 @@ pub struct NodeInfoResponse {
     pub software_version: String,
     pub protocol_version: u16,
     pub chain_id: u32,
-    /// Chain label (hex chain ID or empty for pre-genesis).
+    /// Chain label (hex chain ID or empty for uninitialized).
     pub network_name: String,
     /// Hex-encoded genesis block hash for chain identity.
     pub genesis_hash: String,
@@ -1521,6 +1538,12 @@ pub struct LoggingConfigResponse {
     /// Whether rotating file logging is currently active (cap > 0). When false,
     /// changing the size requires a restart to (re)enable file logging.
     pub file_enabled: bool,
+    /// Absolute path the rotating log actually writes to. `None` when file
+    /// logging is disabled. Depends on `[logging] file_path` and falls back to
+    /// the data dir, so it is not necessarily where packaging docs point.
+    pub file_path: Option<String>,
+    /// Number of rotating files kept (active + rotated).
+    pub max_files: usize,
 }
 
 /// Response for `noble_checkDataDir`.

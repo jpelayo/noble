@@ -2152,7 +2152,7 @@ export function init(root, ctx) {
           ? `<span class="badge" style="background:var(--accent);color:#fff;font-size:var(--font-size-xs);margin-left:var(--gap-sm)">Chain ${chainId}</span>`
           : '';
         // Alignment badge (same state as sidebar)
-        const ALIGN_COLORS = { Isolated: 'var(--error)', Bootstrapping: 'var(--warning)', Creating: 'var(--warning)', Syncing: 'var(--accent)', Verifying: 'var(--accent)', 'Catching Up': 'var(--accent)', Aligned: 'var(--success)', Diverged: 'var(--error)' };
+        const ALIGN_COLORS = { Isolated: 'var(--error)', Bootstrapping: 'var(--warning)', Creating: 'var(--warning)', Syncing: 'var(--accent)', Verifying: 'var(--accent)', 'Catching Up': 'var(--accent)', Aligned: 'var(--success)', Diverged: 'var(--error)', Blocked: 'var(--error)' };
         const st = syncStatus?.state || '';
         const stColor = ALIGN_COLORS[st] || 'var(--text-muted)';
         const alignBadge = st
@@ -2223,7 +2223,14 @@ export function init(root, ctx) {
     if (cfg && cfg.max_size_bytes != null && cfg.max_size_bytes > 0) {
       const mb = Math.round(cfg.max_size_bytes / MB);
       logSizeInput.value = mb;
-      logSizeCurrent.textContent = `current: ${mb} MB`;
+      // Show WHERE the log is, not just how big it may get: the effective path
+      // depends on [logging] file_path and falls back to the data dir, so it
+      // is not necessarily where the packaging docs point.
+      const files = cfg.max_files ? ` across ${cfg.max_files} files` : '';
+      logSizeCurrent.textContent = cfg.file_path
+        ? `current: ${mb} MB${files} — ${cfg.file_path}`
+        : `current: ${mb} MB${files}`;
+      if (cfg.file_path) logSizeCurrent.title = cfg.file_path;
     } else if (cfg && cfg.file_enabled === false) {
       logSizeCurrent.textContent = 'file logging disabled (set in noble.toml)';
     }

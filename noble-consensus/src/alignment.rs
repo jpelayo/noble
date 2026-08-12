@@ -30,6 +30,14 @@ pub enum AlignmentState {
     CatchingUp,
     /// NOT on the majority chain, or healing fork dwell timer running.
     Diverged,
+    /// The node cannot make progress on its own and needs an operator: chain
+    /// integrity failed with no intact prefix to rewind to, or sync is
+    /// refusing blocks for a reason retrying cannot fix (no genesis).
+    ///
+    /// This outranks every other state. It exists so "halted" is decided once,
+    /// by the node, rather than inferred separately by each GUI widget — the
+    /// failure mode being that a stuck node renders as a busy one.
+    Blocked,
 }
 
 impl AlignmentState {
@@ -44,6 +52,7 @@ impl AlignmentState {
             Self::Aligned => "Aligned",
             Self::CatchingUp => "Catching Up",
             Self::Diverged => "Diverged",
+            Self::Blocked => "Blocked",
         }
     }
 
@@ -55,6 +64,7 @@ impl AlignmentState {
             | Self::Verifying => "syncing",
             Self::Aligned => "zero",
             Self::Diverged => "medium",
+            Self::Blocked => "high",
         }
     }
 }
@@ -68,6 +78,10 @@ pub struct AlignmentSnapshot {
     pub highest_known: u64,
     pub progress: f64,
     pub cycles_remaining: Option<u32>,
+    /// Operator-facing explanation when `state == Blocked`. Carried alongside
+    /// the state so the GUI never has to reconstruct the reason from event
+    /// history it may have missed (a page opened after the event fired).
+    pub blocked_reason: Option<String>,
 }
 
 impl Default for AlignmentSnapshot {
@@ -79,6 +93,50 @@ impl Default for AlignmentSnapshot {
             highest_known: 0,
             progress: 0.0,
             cycles_remaining: None,
+            blocked_reason: None,
         }
+    }
+}
+
+
+#[cfg(test)]
+mod blocked_tests {
+    use super::*;
+
+    #[test]
+    fn blocked_has_a_label_and_the_highest_severity() {
+        // Blocked must never render with a "progress" severity — the whole
+        // point is that it does not look like a node making headway.
+        assert_eq!(AlignmentState::Blocked.label(), "Blocked");
+        assert_eq!(AlignmentState::Blocked.severity(), "high");
+        assert_ne!(AlignmentState::Blocked.severity(), "syncing");
+        assert_ne!(AlignmentState::Blocked.severity(), "zero");
+    }
+
+    #[test]
+    fn every_state_has_a_severity() {
+        // `severity()` matches exhaustively; this guards the label side and
+        // documents that no state renders as untyped.
+        for st in [
+            AlignmentState::Isolated,
+            AlignmentState::Bootstrapping,
+            AlignmentState::Creating,
+            AlignmentState::Syncing,
+            AlignmentState::Verifying,
+            AlignmentState::Aligned,
+            AlignmentState::CatchingUp,
+            AlignmentState::Diverged,
+            AlignmentState::Blocked,
+        ] {
+            assert!(!st.label().is_empty());
+            assert!(matches!(st.severity(), "zero" | "syncing" | "medium" | "high"));
+        }
+    }
+
+    #[test]
+    fn default_snapshot_is_not_blocked() {
+        let snap = AlignmentSnapshot::default();
+        assert!(snap.blocked_reason.is_none());
+        assert_ne!(snap.state, AlignmentState::Blocked);
     }
 }

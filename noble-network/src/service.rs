@@ -1732,10 +1732,10 @@ async fn handle_swarm_event(
                     // blockchain or running an incompatible protocol. No tolerance
                     // needed — legitimate peers ALWAYS match on both values.
                     //
-                    // Exception 1: local pre-genesis (config.chain_id == 0) — we haven't
+                    // Exception 1: local uninitialized (config.chain_id == 0) — we haven't
                     // committed genesis yet and need any peer to sync from.
                     //
-                    // Exception 1b: remote pre-genesis (chain_id == 0 AND height == 0) —
+                    // Exception 1b: remote uninitialized (chain_id == 0 AND height == 0) —
                     // a fresh node joining an established network.  The height == 0
                     // guard prevents a malicious peer from claiming chain_id=0 with
                     // height > 0 to bypass the mismatch gate.
@@ -1748,10 +1748,10 @@ async fn handle_swarm_event(
                     let local_early = config.tip_height <= crate::config::EARLY_CHAIN_HEIGHT_LIMIT;
                     let remote_early = height <= crate::config::EARLY_CHAIN_HEIGHT_LIMIT;
                     let early_chain = local_early || remote_early;
-                    let remote_pre_genesis = chain_id == 0 && height == 0;
+                    let remote_uninitialized = chain_id == 0 && height == 0;
                     let chain_mismatch = chain_id != config.chain_id
                         && config.chain_id != 0
-                        && !remote_pre_genesis
+                        && !remote_uninitialized
                         && !early_chain;
                     let proto_mismatch = protocol_version != config.protocol_version;
                     if chain_mismatch || proto_mismatch {
@@ -2546,11 +2546,24 @@ fn handle_gossip_node_announce(
             // fired regardless of announce.chain_id, so cross-chain peers'
             // tips drove our healing logic before the node-layer filter ran.
             // H3: `chain_id == 0` is a wildcard only while WE are unconfigured
-            // (our own chain id is still 0, i.e. pre-genesis). Once this node
+            // (our own chain id is still 0, i.e. uninitialized). Once this node
             // has a chain, a zero chain id no longer buys a pass — otherwise
             // any peer could bypass the cross-chain filter by announcing 0 and
             // drive our healing logic with a foreign chain's tips.
-            let wildcard_allowed = our_chain_id == 0;
+            //
+            // Remote uninitialized is the exception, and it must be one: a fresh
+            // node joining an established network announces chain_id 0 because
+            // it has no chain yet. The connection-level gate already allows
+            // exactly this case ("Exception 1b"), so dropping the announce here
+            // meant we accepted the peer's connection and then refused to learn
+            // it existed — no name, no tip, invisible in the peer list.
+            //
+            // The `height == 0` half is what keeps H3's guarantee intact: a
+            // peer claiming chain_id 0 with a real height is still filtered,
+            // and a peer at height 0 has no tip to drive our healing with.
+            let remote_uninitialized =
+                announce.chain_id == 0 && announce.chain_tip_height.unwrap_or(0) == 0;
+            let wildcard_allowed = our_chain_id == 0 || remote_uninitialized;
             if !(wildcard_allowed && announce.chain_id == 0) && announce.chain_id != our_chain_id {
                 tracing::debug!(
                     task = "node_announce",

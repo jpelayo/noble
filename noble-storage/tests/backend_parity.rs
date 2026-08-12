@@ -31,6 +31,10 @@ enum Outcome {
     RejectedOwnership,
     RejectedConservation,
     RejectedMissingInput,
+    /// A block the operation needed was absent. Typed rather than compared as
+    /// prose: both backends must agree that a block is missing, but they need
+    /// not phrase it identically.
+    RejectedMissingBlock,
     RejectedOther(String),
 }
 
@@ -45,6 +49,7 @@ fn classify(result: Result<(), StorageError>) -> Outcome {
             Outcome::RejectedConservation
         }
         Err(StorageError::UtxoNotFound { .. }) => Outcome::RejectedMissingInput,
+        Err(StorageError::BlockNotFound(_)) => Outcome::RejectedMissingBlock,
         Err(e) => Outcome::RejectedOther(format!("{e}")),
     }
 }
@@ -356,4 +361,89 @@ fn a_rejected_block_leaves_no_state_behind_on_either_backend() {
 
     let outcome = assert_backends_agree("atomicity", check);
     assert_eq!(outcome, Outcome::RejectedOwnership);
+}
+
+// ---------------------------------------------------------------------------
+// Destructive paths must fail closed (2026-08-11 incident)
+// ---------------------------------------------------------------------------
+//
+// A rollback deleted blocks and *then* discovered it could not rebuild the
+// indexes, because the index replay walks `0..=target_height` and this chain
+// has no block at height 0. The chain was left with a tip pointing at deleted
+// data; the integrity probe saw the inconsistency and wiped 196 blocks.
+//
+// Note these fixtures fund at height 1 with no genesis — which is precisely
+// the malformed shape that triggered it.
+
+#[test]
+fn rollback_cannot_remove_genesis() {
+    // Genesis is the chain's foundation; nothing precedes it and no automatic
+    // path may delete it. Rolling back "to 0" on a chain whose genesis is at 0
+    // is a no-op, not a wipe.
+    let (pk_bytes, pk) = keypair();
+    let owner = NobleAddress::Noble(pk);
+
+    let check = |engine: &dyn StorageEngine| -> Result<(), StorageError> {
+        let funding = funded(engine, &pk_bytes, &owner)?;
+        let genesis = engine.genesis()?.expect("chain has a genesis");
+
+        engine.rollback_to_height(genesis.height, 0)?;
+
+        let after = engine.genesis()?.expect("genesis survives rollback");
+        assert_eq!(after.block_hash, genesis.block_hash, "genesis was replaced");
+        assert_eq!(after.height, genesis.height, "genesis moved");
+        assert!(
+            engine.get_block(&genesis.block_hash).is_ok(),
+            "genesis block body was deleted"
+        );
+        let _ = funding;
+        Ok(())
+    };
+
+    assert_eq!(assert_backends_agree("rollback keeps genesis", check), Outcome::Committed);
+}
+
+#[test]
+fn rollback_below_genesis_is_refused_by_both_backends() {
+    // There is no index below genesis. Asking to roll back past it is a
+    // programming error, and must be refused rather than silently truncating.
+    let (pk_bytes, pk) = keypair();
+    let owner = NobleAddress::Noble(pk);
+
+    let check = |engine: &dyn StorageEngine| -> Result<(), StorageError> {
+        let _ = funded(engine, &pk_bytes, &owner)?;
+        let genesis = engine.genesis()?.expect("chain has a genesis");
+        if genesis.height == 0 {
+            // Nothing below 0 to ask for; the invariant holds trivially.
+            return Ok(());
+        }
+        let err = engine
+            .rollback_to_height(genesis.height - 1, 0)
+            .expect_err("must refuse to roll back below genesis");
+        assert!(
+            engine.genesis()?.is_some(),
+            "refused rollback destroyed genesis"
+        );
+        Err(err)
+    };
+
+    // Both backends must agree, whichever branch applies.
+    let _ = assert_backends_agree("rollback below genesis", check);
+}
+
+#[test]
+fn genesis_is_found_wherever_it_sits() {
+    // The accessor must report the chain's first block, not a hardcoded index.
+    let (pk_bytes, pk) = keypair();
+    let owner = NobleAddress::Noble(pk);
+
+    let check = |engine: &dyn StorageEngine| -> Result<(), StorageError> {
+        assert!(engine.genesis()?.is_none(), "empty storage has no genesis");
+        let _ = funded(engine, &pk_bytes, &owner)?;
+        let g = engine.genesis()?.expect("genesis after first commit");
+        assert_eq!(g.height, FUND_HEIGHT, "genesis is the lowest committed height");
+        Ok(())
+    };
+
+    assert_eq!(assert_backends_agree("genesis accessor", check), Outcome::Committed);
 }

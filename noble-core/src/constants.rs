@@ -264,10 +264,21 @@ pub const MIN_RELAY_FEE_RATE: u64 = 1;
 /// Returns 0 for the genesis block (height 0) because the genesis validator key
 /// is deterministically derived and publicly known. First subsidy is at height 1.
 /// Returns 0 when all halvings are exhausted (after 64 halvings).
+/// Height of the genesis block — the chain's foundation, produced under the
+/// Dual-Witness rule with `prev_block_hash = 0`.
+///
+/// There is no block before genesis, so it occupies the first index. Named
+/// rather than written as a literal: the foundation block used to be produced
+/// at height 1, leaving index 0 an empty slot that storage code nonetheless
+/// assumed held a block — an assumption that destroyed a 196-block chain.
+pub const GENESIS_HEIGHT: u64 = 0;
+
 pub fn subsidy_at_height(height: u64) -> u64 {
-    if height == 0 {
-        return 0;
-    }
+    // Genesis is produced by consensus like any other block and is rewarded
+    // like any other block. The former `height == 0 => 0` case described an
+    // *imported*, transaction-less genesis; under Dual-Witness production the
+    // founding witnesses do real work, and a zero-value coinbase would also
+    // have to survive dust rules for no benefit.
     let halvings = height / HALVING_INTERVAL;
     if halvings >= 64 {
         return 0;
@@ -307,12 +318,17 @@ mod tests {
     }
 
     #[test]
-    fn subsidy_at_genesis_is_zero() {
-        // Genesis block subsidy is zero — the genesis validator key is publicly derivable
-        assert_eq!(subsidy_at_height(0), 0);
-        // First subsidy-bearing block is height 1
+    fn genesis_is_paid_like_any_other_block() {
+        // Genesis used to pay zero, because it was an *imported*,
+        // transaction-less block whose key was publicly derivable. It is now
+        // produced by consensus under the Dual-Witness rule — real work by real
+        // validators — so it earns the ordinary subsidy, and the schedule has
+        // no special case at its first index.
+        assert_eq!(subsidy_at_height(GENESIS_HEIGHT), INITIAL_SUBSIDY);
         assert_eq!(subsidy_at_height(1), INITIAL_SUBSIDY);
         assert_eq!(subsidy_at_height(HALVING_INTERVAL - 1), INITIAL_SUBSIDY);
+        // Halving still keys off height, unchanged.
+        assert_eq!(subsidy_at_height(HALVING_INTERVAL), INITIAL_SUBSIDY / 2);
     }
 
     #[test]

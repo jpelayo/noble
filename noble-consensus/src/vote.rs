@@ -198,7 +198,7 @@ pub struct VoteManager {
     /// Current cycle number for vote validation (AUD2-M4).
     current_cycle: u64,
     /// When true, accept votes with cycle ±1 of current_cycle (bootstrap tolerance).
-    /// Enabled during pre-genesis bootstrap, disabled after block 1 commit.
+    /// Enabled while founding the chain, disabled once genesis is committed.
     pub(crate) bootstrap_tolerance: bool,
 }
 
@@ -224,7 +224,7 @@ impl VoteManager {
 
     /// Enable or disable ±1 cycle tolerance for bootstrap.
     ///
-    /// During pre-genesis, nodes starting in adjacent 960s wall-clock windows
+    /// During uninitialized, nodes starting in adjacent 960s wall-clock windows
     /// may disagree on cycle number by 1. This tolerance accepts votes from
     /// those peers. Disabled after block 1 commit.
     pub fn set_bootstrap_tolerance(&mut self, enabled: bool) {
@@ -541,7 +541,7 @@ impl VoteManager {
 
     /// Count unique R1-only voters for a candidate.
     ///
-    /// Used exclusively by the Dual-Witness Rule for genesis (block 1).
+    /// Used exclusively by the Dual-Witness Rule for genesis.
     /// R2 FollowMajority votes are echoes — they don't represent independent
     /// block validation. A solo node could otherwise bootstrap by getting an
     /// automatic R2 echo from any connected peer.
@@ -1062,9 +1062,9 @@ mod tests {
     }
 
     #[test]
-    fn dual_witness_pre_genesis_cycle_zero() {
+    fn dual_witness_uninitialized_cycle_zero() {
         // Votes with cycle=0 should be accepted by a fresh VoteManager
-        // (pre-genesis uses cycle 0).
+        // (uninitialized uses cycle 0).
         let mut mgr = VoteManager::new();
         assert_eq!(mgr.current_cycle, 0);
 

@@ -431,7 +431,11 @@ export function init(root, ctx) {
   // Key = event type + peer/node identifier → last entry index + timestamp.
   // If the same key fires again within DEDUP_WINDOW_MS, increment a counter
   // on the existing entry instead of appending a new one.
-  const DEDUP_WINDOW_MS = 5000;
+  // 30s, not 5s: healing clues re-fire on a ~10s cadence, so a 5s window never
+  // coalesced them and a stuck node filled the whole feed with the same three
+  // lines repeating forever. The count badge and refreshed timestamp preserve
+  // the information; only the repetition is dropped.
+  const DEDUP_WINDOW_MS = 30000;
   const _lastEntryByKey = new Map(); // key → { idx, ts }
 
   function dedupKey(data) {
@@ -724,7 +728,10 @@ export function init(root, ctx) {
       const msg = formatActivityMessage(data);
       if (!msg) continue;
       const badge = count > 1 ? ` <span style="font-size:0.75em;color:var(--text-muted);background:var(--bg-tertiary);padding:0 4px;border-radius:3px">\u00d7${count}</span>` : '';
-      html += `<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="color:var(--text-muted)">${ts}</span> <span style="color:${color}">${icon}</span> ${escapeHtml(msg)}${badge}</div>`;
+      // title= so a truncated line is still readable on hover — these
+      // messages carry the actionable half at the end ("...sync cannot
+      // advance"), which is exactly what the ellipsis was eating.
+      html += `<div title="${escapeHtml(msg)}" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="color:var(--text-muted)">${ts}</span> <span style="color:${color}">${icon}</span> ${escapeHtml(msg)}${badge}</div>`;
     }
     csActivityLog.innerHTML = html;
   }
@@ -841,6 +848,14 @@ export function init(root, ctx) {
         // After sync finishes, all panels need a full refresh — the timeline,
         // cycle display, vote tallies, and validator list are all stale.
         scheduleReload(loadCycle, loadTimeline, loadVoteTallies, loadValidators);
+      } else if (data.event === 'sync_blocked' || data.event === 'integrity_failure') {
+        // Sync is not progressing and cannot, without an operator. Rendering
+        // this as the usual yellow "catching up" banner is what let a halted
+        // node look like a busy one for hours.
+        showBlockedBanner(data.message || 'Sync blocked — operator action required');
+      } else if (data.event === 'integrity_repaired') {
+        updateSyncBanner(false);
+        scheduleReload(loadCycle, loadTimeline, loadVoteTallies, loadValidators);
       }
     }));
 
@@ -904,9 +919,40 @@ export function init(root, ctx) {
   // ── Sync banner management ──
   const syncBanner = root.querySelector('#cs-sync-banner');
 
+  // The node decides whether it is blocked (AlignmentState::Blocked). This
+  // page does not maintain its own opinion — the previous sticky local flag
+  // was a fourth independent derivation of chain phase, which is the class of
+  // bug M2 exists to remove.
+  const isBlocked = () => window.state?.alignment?.state === 'Blocked';
+  const blockedReason = () =>
+    window.state?.alignment?.blockedReason ||
+    'Sync blocked — operator action required';
+
+  function paintBanner(kind, message) {
+    if (!syncBanner) return;
+    const err = kind === 'blocked';
+    syncBanner.style.display = 'block';
+    syncBanner.style.background = err ? 'var(--bg-error, #fee2e2)' : 'var(--bg-warning, #fef3c7)';
+    syncBanner.style.borderColor = err ? 'var(--border-error, #ef4444)' : 'var(--border-warning, #f59e0b)';
+    syncBanner.style.color = err ? 'var(--text-error, #991b1b)' : 'var(--text-warning, #92400e)';
+    syncBanner.textContent = message;
+  }
+
+  function showBlockedBanner(message) {
+    paintBanner('blocked', message);
+  }
+
   function updateSyncBanner(syncing, targetHeight, currentHeight, progressPct) {
     if (!syncBanner) return;
+    // Blocked outranks everything: progress chatter must never paint over a
+    // halted node. Asking the shared state each time means a page opened after
+    // the blocking event still renders correctly.
+    if (isBlocked()) {
+      paintBanner('blocked', blockedReason());
+      return;
+    }
     if (syncing) {
+      paintBanner('sync', '');
       syncBanner.style.display = 'block';
       if (currentHeight && targetHeight) {
         syncBanner.textContent = `Syncing \u2014 block ${formatNumber(currentHeight)} of ${formatNumber(targetHeight)} (${progressPct || 0}%)`;
@@ -1882,13 +1928,22 @@ export function init(root, ctx) {
     const sane = status.cycle_number != null && !creating;
     csCycleNum.textContent = creating ? '—' : (sane ? formatNumber(status.cycle_number) : '—');
     csPhaseName.textContent = creating ? 'Creating' : (status.phase || 'Bootstrapping');
-    csCycleInfo.textContent = creating ? 'Forming consensus' : (sane ? `#${formatNumber(status.cycle_number)}` : 'Forming chain');
+    // Timeline label reads the node's authoritative chain phase. Deriving it
+    // from cycle_number alone produced "Forming chain" on a node that was in
+    // fact 197 blocks behind an existing one.
+    const phase = window.state?.alignment?.state || null;
+    const phaseLabel = { Syncing: 'Joining chain', 'Catching Up': 'Catching up',
+      Blocked: 'Halted', Diverged: 'Diverged', Isolated: 'No peers',
+      Verifying: 'Verifying' }[phase];
+    csCycleInfo.textContent = creating
+      ? 'Forming consensus'
+      : (sane ? `#${formatNumber(status.cycle_number)}` : (phaseLabel || 'Forming chain'));
 
     // Track phase key for UI updates (phase_change activity comes from WS only).
     lastPhaseKey = `${status.cycle_number || 'boot'}:${status.phase_index}`;
 
     if (creating) {
-      // Post-genesis re-alignment: block 1 committed, engine resetting epoch.
+      // Post-genesis re-alignment: genesis committed, engine resetting epoch.
       // Hide cycle details and pipeline — show "Creating" status only.
       csPhaseName.textContent = 'Creating';
       csPhaseRemaining.textContent = formatCountdown(status.cycle_remaining_secs || 0);
@@ -1908,6 +1963,20 @@ export function init(root, ctx) {
         }
       };
       window._nobleTick.add(tickFn);
+      return;
+    }
+
+    if (!sane && isBlocked()) {
+      // Not eligible to participate: a running phase countdown here reads as
+      // "this node is taking part in consensus", which is the opposite of the
+      // truth while it is halted. Show the state instead of a clock.
+      if (tickFn) { window._nobleTick.remove(tickFn); tickFn = null; }
+      csPhaseName.textContent = 'Halted';
+      csPhaseRemaining.textContent = '—';
+      csCycleRemaining.textContent = '—';
+      csValidator.textContent = '—';
+      csCycleInfo.textContent = 'Not participating';
+      csPipeline.innerHTML = `<div style="text-align:center;padding:var(--gap);color:var(--text-muted);font-size:var(--font-size-sm)">${escapeHtml(blockedReason())}</div>`;
       return;
     }
 

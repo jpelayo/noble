@@ -826,6 +826,11 @@ export class MockRpcClient {
           highest_known: this.chainHeight,
           progress: 1.0,
           state: 'Aligned',
+          // Keep in step with SyncStatusResponse — a mock that omits fields the
+          // real RPC returns makes the GUI look correct against data it will
+          // never actually receive.
+          severity: 'zero',
+          blocked_reason: null,
         };
 
       case 'noble_getValidatorList':
@@ -1864,7 +1869,14 @@ export class MockRpcClient {
       }
 
       case 'noble_getLoggingConfig':
-        return { max_size_bytes: 1073741824, file_enabled: true };
+        // Shape must track LoggingConfigResponse — a mock missing fields the
+        // real RPC returns lets the GUI be built against data it never gets.
+        return {
+          max_size_bytes: 1073741824,
+          file_enabled: true,
+          file_path: '/opt/homebrew/var/log/noble-node.log',
+          max_files: 5,
+        };
 
       case 'noble_getTotpStatus':
         return { enabled: false, scope: 'all' };

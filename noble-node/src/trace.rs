@@ -230,6 +230,14 @@ pub fn init_tracing(config: &TraceConfig) -> Arc<TraceHandle> {
         config.initial_filter.clone(),
         set_filter_fn,
         log_max_size,
+        // Only report a path when file logging is actually on, so the RPC
+        // can't advertise a file nothing is writing to.
+        config
+            .log_file_path
+            .as_ref()
+            .filter(|_| file_enabled)
+            .map(|p| p.display().to_string()),
+        config.log_max_files,
     ))
 }
 

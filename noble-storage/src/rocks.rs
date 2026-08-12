@@ -1188,6 +1188,27 @@ impl StorageEngine for RocksDbStorage {
         self.get_block(block_hash).map(|b| b.header)
     }
 
+    fn genesis(&self) -> Result<Option<ChainTip>, StorageError> {
+        self.check_open()?;
+        let cf_blocks = self.cf(CF_BLOCKS)?;
+        // Heights are stored big-endian, so the first key in iteration order is
+        // the lowest height present — the genesis block, wherever it sits.
+        let mut iter = self.db.iterator_cf(cf_blocks, IteratorMode::Start);
+        let Some(item) = iter.next() else { return Ok(None) };
+        let (key, block_bytes) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+        let height = u64::from_be_bytes(
+            key.as_ref()
+                .try_into()
+                .map_err(|_| StorageError::Database("malformed block height key".into()))?,
+        );
+        let block = Block::from_cbor(&block_bytes)?;
+        let block_hash = block
+            .header
+            .compute_block_hash()
+            .map_err(|e| StorageError::Codec(e.to_string()))?;
+        Ok(Some(ChainTip { block_hash, height }))
+    }
+
     fn get_block_hash_by_height(&self, height: u64) -> Result<Hash256, StorageError> {
         self.check_open()?;
 
@@ -1497,10 +1518,53 @@ impl StorageEngine for RocksDbStorage {
         let cf_addr_utxo = self.cf(CF_ADDRESS_UTXOS)?;
         let cf_undo = self.cf(CF_UNDO_DATA)?;
 
-        // Process blocks in reverse order using undo data
+        // PREFLIGHT — validate before mutating.
+        //
+        // Every read this operation depends on is performed here, while the
+        // database is still untouched, so a missing prerequisite returns Err
+        // with storage intact instead of failing halfway through.
+        //
+        // This is not hypothetical: the index replay below walks
+        // `0..=target_height`, and on 2026-08-11 it hit `BlockNotFound` at
+        // height 0 on a chain that had no genesis block — *after* the undo
+        // loop had already committed the deletion of the rolled-back blocks.
+        // The tip then pointed at a block that no longer existed, the
+        // integrity probe saw the inconsistency, and 196 blocks were wiped.
+        for h in (target_height + 1..=tip.height).rev() {
+            if self
+                .db
+                .get_cf(cf_undo, h.to_be_bytes())
+                .map_err(|e| StorageError::Database(e.to_string()))?
+                .is_none()
+            {
+                return Err(StorageError::UndoDataNotFound { height: h });
+            }
+        }
+        // The replay range must be fully readable, or the rebuilt indexes
+        // would silently lose entries even if every write succeeded. It starts
+        // at GENESIS, not at index 0 — nothing exists below genesis, and
+        // assuming otherwise is what turned a rollback into data loss.
+        let genesis_height = self
+            .genesis()?
+            .ok_or_else(|| StorageError::BlockNotFound("no genesis block".to_string()))?
+            .height;
+        if target_height < genesis_height {
+            return Err(StorageError::Database(format!(
+                "cannot roll back below genesis (genesis at {genesis_height}, target {target_height})"
+            )));
+        }
+        for h in genesis_height..=target_height {
+            let hash = self.get_block_hash_by_height(h)?;
+            self.get_block(&hash)?;
+        }
+
+        // Process blocks in reverse order using undo data.
+        // One batch for the whole range: RocksDB applies a WriteBatch
+        // atomically, so a partial rollback cannot be observed. Bounded by
+        // MAX_REORG_DEPTH (144), so the batch stays small.
+        let mut batch = WriteBatch::default();
         for h in (target_height + 1..=tip.height).rev() {
             let height_be = h.to_be_bytes();
-            let mut batch = WriteBatch::default();
 
             // Load undo data for this height
             let undo_bytes = self
@@ -1581,11 +1645,11 @@ impl StorageEngine for RocksDbStorage {
             // Remove block data and undo data
             batch.delete_cf(cf_blocks, height_be);
             batch.delete_cf(cf_undo, height_be);
-
-            self.db
-                .write(batch)
-                .map_err(|e| StorageError::Database(e.to_string()))?;
         }
+
+        self.db
+            .write(batch)
+            .map_err(|e| StorageError::Database(e.to_string()))?;
 
         // Clear and rebuild merge-append indexes (checksum, version_chain, issuer, metadata)
         let mut clear_batch = WriteBatch::default();
@@ -1623,7 +1687,7 @@ impl StorageEngine for RocksDbStorage {
         let mut replay_batch = WriteBatch::default();
         let mut replay_supply: u64 = 0;
 
-        for h in 0..=target_height {
+        for h in genesis_height..=target_height {
             let hash = self.get_block_hash_by_height(h)?;
             let block = self.get_block(&hash)?;
 
@@ -1722,6 +1786,21 @@ impl StorageEngine for RocksDbStorage {
             return Ok(tip);
         }
 
+        // PREFLIGHT — resolve genesis before destroying anything.
+        //
+        // These two reads used to live *after* the delete batch was committed
+        // (below, at the tip update and the replay). On a chain with no block
+        // at height 0 they returned BlockNotFound, so this function wiped
+        // every block and then failed — leaving a tip pointing at deleted
+        // data. Resolving them first makes a chain without genesis a clean
+        // refusal instead of the destructive half-step it was.
+        let genesis = self
+            .genesis()?
+            .ok_or_else(|| StorageError::BlockNotFound("no genesis block".to_string()))?;
+        let genesis_hash = genesis.block_hash;
+        let genesis_height = genesis.height;
+        let genesis_block = self.get_block(&genesis_hash)?;
+
         tracing::warn!(
             "force_reset_to_genesis: wiping {} blocks (bypasses MAX_REORG_DEPTH)",
             tip.height
@@ -1733,7 +1812,7 @@ impl StorageEngine for RocksDbStorage {
         let cf_hashes = self.cf(CF_BLOCK_HASHES)?;
         let cf_tx = self.cf(CF_TX_INDEX)?;
 
-        for h in 1..=tip.height {
+        for h in (genesis_height + 1)..=tip.height {
             let height_be = h.to_be_bytes();
             if let Some(block_bytes) = self
                 .db
@@ -1788,18 +1867,17 @@ impl StorageEngine for RocksDbStorage {
             }
         }
 
-        // Update chain tip to genesis
+        // Update chain tip to genesis (resolved in the preflight above)
         let cf_state = self.cf(CF_CHAIN_STATE)?;
-        let genesis_hash = self.get_block_hash_by_height(0)?;
         clear_batch.put_cf(cf_state, KEY_TIP_HASH, genesis_hash.as_bytes());
-        clear_batch.put_cf(cf_state, KEY_TIP_HEIGHT, 0u64.to_be_bytes());
+        clear_batch.put_cf(cf_state, KEY_TIP_HEIGHT, genesis_height.to_be_bytes());
 
         self.db
             .write(clear_batch)
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
-        // Replay genesis block (height 0) for UTXOs
-        let block = self.get_block(&genesis_hash)?;
+        // Replay genesis block (height 0) for UTXOs — read in the preflight
+        let block = genesis_block;
         let mut replay_batch = WriteBatch::default();
         let cf_utxo = self.cf(CF_UTXO_SET)?;
         let cf_addr_utxo = self.cf(CF_ADDRESS_UTXOS)?;
@@ -1813,7 +1891,7 @@ impl StorageEngine for RocksDbStorage {
                         let entry = UtxoEntry {
                             value: output.value,
                             address: output.address.clone(),
-                            height: 0,
+                            height: genesis_height,
                             is_coinbase: tx.is_coinbase(),
                         };
                         let op_key = Self::outpoint_key(&outpoint);
@@ -1829,7 +1907,7 @@ impl StorageEngine for RocksDbStorage {
             }
         }
 
-        let subsidy = subsidy_at_height(0);
+        let subsidy = subsidy_at_height(genesis_height);
         let cf_state = self.cf(CF_CHAIN_STATE)?;
         replay_batch.put_cf(cf_state, KEY_TOTAL_SUPPLY, subsidy.to_be_bytes());
 
@@ -1839,7 +1917,7 @@ impl StorageEngine for RocksDbStorage {
 
         Ok(ChainTip {
             block_hash: genesis_hash,
-            height: 0,
+            height: genesis_height,
         })
     }
 
@@ -1882,7 +1960,7 @@ impl StorageEngine for RocksDbStorage {
                 .map_err(|e| StorageError::Database(e.to_string()))?;
         }
 
-        tracing::warn!("wipe_all_chain_data: all data cleared — node is in pre-genesis state");
+        tracing::warn!("wipe_all_chain_data: all data cleared — node is in uninitialized state");
         Ok(())
     }
 
@@ -3086,12 +3164,13 @@ mod tests {
             prev = hash;
         }
 
-        // Heights 1,2,3 each give INITIAL_SUBSIDY; height 0 gives 0
-        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 3);
+        // Four blocks, each paying the ordinary subsidy — genesis included,
+        // since it is produced like any other block.
+        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 4);
 
         db.rollback_to_height(2, test_chain_id()).unwrap();
-        // After rollback: heights 0,1,2 remain → 0 + INITIAL_SUBSIDY + INITIAL_SUBSIDY
-        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 2);
+        // Heights 0,1,2 remain.
+        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 3);
     }
 
     #[test]

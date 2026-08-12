@@ -42,7 +42,7 @@ pub trait ConsensusStateMachine {
     /// Return phase timing: (phase_index, phase_remaining_secs, cycle_remaining_secs).
     /// phase_index: 0 = Proposal, 1 = Voting, 2 = Reflection, 3 = Propagation.
     fn phase_timing(&self) -> (u8, u64, u64);
-    /// Return the genesis timestamp (block 1's timestamp), or `None` if not set.
+    /// Return the genesis block's timestamp, or `None` if not set.
     fn genesis_timestamp(&self) -> Option<u64>;
     /// Return the cycle number for a given block timestamp.
     fn cycle_for_timestamp(&self, ts: u64) -> Option<u64>;
@@ -295,12 +295,12 @@ impl CycleEngine {
 
     /// Human-readable cycle label for log messages.
     ///
-    /// Before genesis (`tip_height == 0`) the cycle number is wall-clock-aligned
+    /// With no chain yet the cycle number is wall-clock-aligned
     /// (typically 0) but the chain has no blocks yet, so we display
-    /// `"pre-genesis"` instead.
+    /// `"uninitialized"` instead.
     fn cycle_label(&self) -> String {
-        if self.tip_height == 0 {
-            "pre-genesis".to_string()
+        if !self.has_chain() {
+            "uninitialized".to_string()
         } else {
             self.tracked_cycle.to_string()
         }
@@ -350,7 +350,7 @@ impl CycleEngine {
 
     /// Update the chain_id after block 1 commits.
     ///
-    /// The engine starts with chain_id=0 (pre-genesis). After block 1 commits
+    /// The engine starts with chain_id=0 (no chain). After genesis commits
     /// and the real chain_id is derived from block 1's hash, this must be called
     /// so that blocks 2+ are proposed/validated with the correct chain_id.
     /// Without this, the engine uses chain_id=0 for all blocks in the session,
@@ -461,8 +461,33 @@ impl CycleEngine {
     ///
     /// Used after `force_reset_to_genesis()` for fork recovery (blockchain hop).
     /// Clears the vote manager, candidate tracker, cycle history, and — when
-    /// resetting to height 0 — the cycle epoch so the engine re-enters pre-genesis
+    /// resetting to height 0 — the cycle epoch so the engine re-enters uninitialized
     /// mode and waits for the new chain's block 1 to set the epoch.
+    /// Whether this node has a chain at all.
+    ///
+    /// Derived, not stored: a committed block's hash is a SHA-256 digest and
+    /// can never be zero, so a zero tip hash means "no chain" and nothing else.
+    /// The absence of a chain used to be encoded as `tip_height == 0`, which is
+    /// indistinguishable from a chain whose genesis sits at height 0 — that
+    /// collision is why genesis was produced at height 1, leaving index 0 an
+    /// empty slot the storage layer then assumed held a block.
+    pub fn has_chain(&self) -> bool {
+        self.tip_hash != Hash256::ZERO
+    }
+
+    /// Height of the next block to produce.
+    ///
+    /// With no chain this is 0: the genesis block is the foundation and there
+    /// is nothing before it, so it occupies the first index rather than
+    /// leaving one empty beneath it.
+    pub fn next_height(&self) -> u64 {
+        if self.has_chain() {
+            self.tip_height + 1
+        } else {
+            0
+        }
+    }
+
     pub fn reset_tip(&mut self, height: u64, block_hash: Hash256, force: bool) -> Result<(), ConsensusError> {
         if !force && height != 0 {
             if height <= self.finality_tracker.finalized_height {
@@ -597,12 +622,12 @@ impl CycleEngine {
         // (consensus commit, sync import). Clears stale vote commitments,
         // re-initializes cycle tracking, and suppresses voting to prevent
         // equivocation with peers that still hold pre-reset votes.
-        if height == 1 {
-            info!("block 1 tip update — cycle epoch set to {}", timestamp);
+        if height == noble_core::GENESIS_HEIGHT {
+            info!("genesis tip update — cycle epoch set to {}", timestamp);
             self.cycle_mgr.set_genesis_timestamp(timestamp);
             self.vote_mgr.set_bootstrap_tolerance(false);
 
-            // Clear stale vote commitments from the pre-genesis epoch.
+            // Clear stale vote commitments from the uninitialized epoch.
             // Without this, votes from the old epoch's cycle numbers
             // persist in vote_commitments. When the new epoch produces
             // the same cycle number, legitimate new votes are flagged
@@ -660,7 +685,7 @@ impl CycleEngine {
         //
         // Re-aligning on every tick kept `current_cycle()` permanently at 0,
         // preventing the cycle boundary from ever firing (bootstrap deadlock).
-        if self.tip_height == 0 && self.first_tick {
+        if !self.has_chain() && self.first_tick {
             let cd = self.cycle_mgr.cycle_duration();
             let aligned = (now / cd) * cd;
             self.cycle_mgr.set_genesis_timestamp(aligned);
@@ -705,7 +730,7 @@ impl CycleEngine {
                 // the old epoch). Re-read from the updated cycle manager to
                 // prevent stale phase transitions, stale vote casting, and
                 // stale proposal deadlines in the remainder of this tick.
-                if self.tip_height == 1 {
+                if self.tip_height == noble_core::GENESIS_HEIGHT {
                     new_cycle = self.cycle_mgr.current_cycle(now);
                     new_phase = self.cycle_mgr.current_phase(now);
                     // tracked_cycle/tracked_phase were already set by the
@@ -745,7 +770,7 @@ impl CycleEngine {
         if new_phase == CyclePhase::Proposal
             && self.our_validator_key.is_some()
             && self.proposals_enabled
-            && !(self.chain_id == 0 && self.tip_height >= 1)
+            && !(self.chain_id == 0 && self.has_chain())
         {
             let our_wire = self.our_validator_key.as_ref().unwrap().1.to_wire_bytes();
             if !self.candidate_tracker.has_proposed(&our_wire) {
@@ -938,7 +963,7 @@ impl CycleEngine {
             })
             .collect();
 
-        // Genesis isolation guard: before block 1 is committed (tip_height == 0),
+        // Genesis isolation guard: before genesis is committed (no chain yet),
         // require at least one connected peer.  The Dual-Witness Rule already
         // mandates ≥2 unique voters for block 1, but with zero peers the only
         // vote is the self-vote — which trivially wins plurality.  This guard
@@ -948,7 +973,7 @@ impl CycleEngine {
         // using its self-vote.  If a peer disconnects after block 1, the chain
         // must keep growing — a stuck chain is worse than a potential fork.
         // Fork resolution (manual or automatic) handles divergence on reconnect.
-        if self.tip_height == 0 && self.total_peers == 0 {
+        if !self.has_chain() && self.total_peers == 0 {
             debug!(
                 "cycle {cl}: genesis isolation guard — no connected peers, skipping consensus"
             );
@@ -1006,7 +1031,7 @@ impl CycleEngine {
         // After genesis, a solo validator must be able to keep the chain
         // growing when peers disconnect. A stuck chain is worse than a
         // potential fork (resolved by healing on reconnect).
-        let effective_config = if self.tip_height >= 1 {
+        let effective_config = if self.has_chain() {
             let mut cfg = self.config.clone();
             cfg.min_peers_for_consensus = 1;
             cfg
@@ -1020,12 +1045,12 @@ impl CycleEngine {
                 candidate_hash,
                 strength,
             } => {
-                // Dual-Witness Rule: only the genesis block (block 1) requires ≥ min_unique_voters
+                // Dual-Witness Rule: only the genesis block requires ≥ min_unique_voters
                 // distinct keys voting for the winning candidate. After block 1 is committed,
                 // normal plurality consensus applies.
-                // Genesis (block 1): require R1-only witnesses. R2 FollowMajority
+                // Genesis: require R1-only witnesses. R2 FollowMajority
                 // echoes don't count — they're automatic, not independent validation.
-                let witness_ok = self.tip_height >= 1
+                let witness_ok = self.has_chain()
                     || self.vote_mgr.unique_r1_voter_count_for_candidate(&candidate_hash) >= self.config.min_unique_voters;
 
                 if witness_ok {
@@ -1061,8 +1086,9 @@ impl CycleEngine {
                             .collect();
                         let unique_witness =
                             self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash);
-                        let dual_required = new_height == 1;
-                        let vote_cycle = if new_height == 1 { 0 } else { completed_cycle };
+                        let dual_required = new_height == noble_core::GENESIS_HEIGHT;
+                        let vote_cycle =
+                            if new_height == noble_core::GENESIS_HEIGHT { 0 } else { completed_cycle };
                         outputs.push(CycleIo::StoreBlockVotes {
                             height: new_height,
                             votes: Box::new(crate::history::BlockVotes {
@@ -1090,7 +1116,7 @@ impl CycleEngine {
                         // Guard: sync may have advanced the tip while the cycle
                         // was running — don't double-commit a block already imported.
                         // The vote witness above is stored regardless.
-                        if new_height != self.tip_height + 1 {
+                        if new_height != self.next_height() {
                             debug!(
                                 "cycle {cl}: block already imported by sync at height {} (tip is {}), vote witness stored",
                                 new_height, self.tip_height
@@ -1109,7 +1135,7 @@ impl CycleEngine {
                             self.tip_hash = new_hash;
                             self.tip_timestamp = block.header.timestamp;
                             self.tip_header = Some(block.header.clone());
-                            if new_height == 1 {
+                            if new_height == noble_core::GENESIS_HEIGHT {
                                 info!(
                                     "block 1 committed — cycle epoch set to {}",
                                     block.header.timestamp
@@ -1158,7 +1184,7 @@ impl CycleEngine {
                             // Genesis auto-badge: grant badges to block 1 proposer + all witnesses.
                             // This bootstraps the badge system from genesis — these nodes
                             // can then vote on badges for future validators.
-                            if new_height == 1 {
+                            if new_height == noble_core::GENESIS_HEIGHT {
                                 let now_unix = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
@@ -1170,7 +1196,7 @@ impl CycleEngine {
                                         proposer_wire.clone(),
                                         crate::badge::VoteBadge::new(1, completed_cycle, vec![], now_unix),
                                     );
-                                    info!("genesis badge granted to block 1 proposer");
+                                    info!("genesis badge granted to the genesis proposer");
                                 }
                                 // Grant badge to all R1 voters for the winning candidate
                                 for voter_wire in self.vote_mgr.r1_voters_for(&candidate_hash) {
@@ -1191,7 +1217,7 @@ impl CycleEngine {
                                     }
                                 }
                                 let badge_count = self.badge_store.count_active();
-                                info!("genesis auto-badge: {badge_count} badge(s) granted to block 1 participants");
+                                info!("genesis auto-badge: {badge_count} badge(s) granted to genesis participants");
                             }
 
                             self.process_badge_transactions(&block, completed_cycle);
@@ -1302,7 +1328,7 @@ impl CycleEngine {
 
         // Only persist cycles that had real activity (proposals, votes, or a winner).
         // Empty indeterminate cycles are noise — don't waste storage on them.
-        // Skip the genesis cycle entirely: when block 1 commits, first_tick is set
+        // Skip the genesis cycle entirely: when genesis commits, first_tick is set
         // and ClearCycleHistory purges bootstrap entries.  Recording this cycle would
         // use a bootstrap-epoch number (e.g. 224) that is meaningless after the epoch
         // change.  The block commit itself is the permanent record; the first REAL
@@ -1820,16 +1846,18 @@ impl CycleEngine {
 
         // Ignore blocks at or below the current tip — they're already committed
         // (e.g., a delayed sync response arriving after the cycle boundary).
-        if block.header.height <= self.tip_height {
+        if self.has_chain() && block.header.height <= self.tip_height {
             return outputs;
         }
 
-        // Safety: tip_height=0 has no parent header for B2/B3 validation.
-        // Only accept block 1 (the expected next block).
-        if self.tip_height == 0 && block.header.height != 1 {
+        // With no chain there is no parent header for B2/B3, so the only block
+        // acceptable is genesis itself — the foundation, at the first index,
+        // with nothing before it.
+        if block.header.height != self.next_height() {
             outputs.push(CycleIo::Log(format!(
-                "ignoring block at height {} when tip=0 (expected 1)",
+                "ignoring block at height {} (expected {})",
                 block.header.height,
+                self.next_height(),
             )));
             return outputs;
         }
@@ -2313,7 +2341,7 @@ impl CycleEngine {
         match crate::proposal::propose_block(
             &txs,
             self.tip_hash,
-            self.tip_height + 1,
+            self.next_height(),
             now,
             self.chain_id,
             priv_key,
@@ -2343,7 +2371,7 @@ impl CycleEngine {
                         let tx_ctx = TxValidationContext {
                             chain_id: self.chain_id,
                             time_context: TimeContext::RealTime { wall_clock: current_time },
-                            chain_height: self.tip_height + 1,
+                            chain_height: self.next_height(),
                         };
                         match tx.compute_tx_id(self.chain_id) {
                             Ok(tx_id) => {
@@ -2397,7 +2425,7 @@ impl CycleEngine {
                     self.cycle_label(),
                     hash_short,
                     txs.len(),
-                    self.tip_height + 1
+                    self.next_height()
                 )));
             }
             Err(e) => {
@@ -2801,8 +2829,8 @@ mod tests {
         let mut engine = make_engine(None, &[vpub.clone()], 5);
         engine.tracked_phase = CyclePhase::Proposal;
 
-        // Use height=1 (next block after tip=0)
-        let (block, _hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        // Genesis: the founding block, at the first index
+        let (block, _hash) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         let outputs = engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"peer1".to_vec(),
@@ -2820,8 +2848,8 @@ mod tests {
         let mut engine = make_engine(None, &[vpub.clone()], 5);
         engine.tracked_phase = CyclePhase::Voting;
 
-        // Use height=1 (next block after tip=0)
-        let (block, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        // Genesis: the founding block, at the first index
+        let (block, _) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         let outputs = engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"peer1".to_vec(),
@@ -2915,7 +2943,7 @@ mod tests {
         let mut engine = make_engine(None, &all_validators, 5);
 
         // Add a candidate
-        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block, hash) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.tracked_phase = CyclePhase::Proposal;
         engine.step(CycleEvent::BlockProposed {
             block,
@@ -2935,7 +2963,7 @@ mod tests {
         // Cycle boundary
         let outputs = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
         assert!(has_commit(&outputs), "strong majority should commit");
-        assert_eq!(engine.tip_height, 1);
+        assert_eq!(engine.tip_height, noble_core::GENESIS_HEIGHT);
         assert_eq!(engine.tip_hash, hash);
     }
 
@@ -2944,7 +2972,7 @@ mod tests {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 1); // < 2 min_peers
 
-        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block, hash) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.tracked_phase = CyclePhase::Proposal;
         engine.step(CycleEvent::BlockProposed {
             block,
@@ -2973,8 +3001,8 @@ mod tests {
         let mut engine = make_engine(None, &[vpub.clone()], 5);
         engine.tracked_phase = CyclePhase::Proposal;
 
-        let (block1, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
-        let (mut block2, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block1, _) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
+        let (mut block2, _) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         block2.header.timestamp += 1;
         let msg = block2.header.compute_signing_message().unwrap();
         block2.header.validator_sig = vp.sign(&msg).unwrap();
@@ -3001,12 +3029,12 @@ mod tests {
         let mut engine = make_engine(None, &[vpub.clone()], 5);
         engine.tracked_phase = CyclePhase::Proposal;
 
-        let (block1, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
-        let (mut block2, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block1, _) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
+        let (mut block2, _) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         block2.header.timestamp += 1;
         let msg2 = block2.header.compute_signing_message().unwrap();
         block2.header.validator_sig = vp.sign(&msg2).unwrap();
-        let (mut block3, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (mut block3, _) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         block3.header.timestamp += 2;
         let msg3 = block3.header.compute_signing_message().unwrap();
         block3.header.validator_sig = vp.sign(&msg3).unwrap();
@@ -3035,7 +3063,7 @@ mod tests {
         let mut engine = make_engine(None, &[vpub.clone()], 5);
         engine.tracked_phase = CyclePhase::Proposal;
 
-        let (block, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block, _) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         let block_clone = Box::new(Block {
             header: block.header.clone(),
             transactions: block.transactions.clone(),
@@ -3094,7 +3122,7 @@ mod tests {
 
         // Add a candidate
         engine.tracked_phase = CyclePhase::Proposal;
-        let (block, _hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block, _hash) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
@@ -3123,7 +3151,7 @@ mod tests {
 
         // Proposal
         engine.tracked_phase = CyclePhase::Proposal;
-        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block, hash) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
@@ -3189,7 +3217,7 @@ mod tests {
         let mut engine = make_engine(None, &all_validators, 5);
         engine.tracked_phase = CyclePhase::Proposal;
 
-        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block, hash) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
@@ -3206,7 +3234,7 @@ mod tests {
 
         engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
         let (h, _) = engine.chain_tip();
-        assert_eq!(h, 1, "chain tip should advance to height 1");
+        assert_eq!(h, noble_core::GENESIS_HEIGHT, "chain tip should advance to genesis height");
     }
 
     // --- Helper functions ---
@@ -3254,7 +3282,7 @@ mod tests {
         let mut engine = make_engine(None, &[vpub.clone()], 2);
         // tip_height=0 from make_engine
         engine.tracked_phase = CyclePhase::Proposal;
-        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block, hash) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
@@ -3276,7 +3304,7 @@ mod tests {
         let (vp2, vpub2) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone(), vpub2.clone()], 2);
         engine.tracked_phase = CyclePhase::Proposal;
-        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block, hash) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
@@ -3294,18 +3322,18 @@ mod tests {
         });
         let outputs = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
         assert!(has_commit(&outputs), "2 voters should commit block 1");
-        assert_eq!(engine.tip_height, 1);
+        assert_eq!(engine.tip_height, noble_core::GENESIS_HEIGHT);
     }
 
     #[test]
-    fn dual_witness_not_required_after_block_1() {
-        // tip_height=1, 1 voter → normal plurality, no Dual-Witness → commits.
+    fn dual_witness_not_required_after_genesis() {
+        // tip at genesis, 1 voter → normal plurality, no Dual-Witness → commits.
         // Use min_peers_for_consensus=1 to isolate the Dual-Witness check
         // (this test is not about the minimum voter threshold).
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 2);
         engine.config.min_peers_for_consensus = 1;
-        engine.tip_height = 1;
+        engine.tip_height = noble_core::GENESIS_HEIGHT;
         let parent_hash = Hash256::from_bytes([0x99; 32]);
         engine.tip_hash = parent_hash;
         // Set a tip_header so B2/B3 validation can work
@@ -3319,7 +3347,7 @@ mod tests {
             prev_block_hash: Hash256::from_bytes([0x88; 32]),
             merkle_root,
             timestamp: now_ts - 10,
-            height: 1,
+            height: noble_core::GENESIS_HEIGHT,
             tx_count: 0,
             validator_id: vpub.clone(),
             validator_sig: SignatureEnvelope {
@@ -3334,8 +3362,9 @@ mod tests {
         // Recompute tip_hash from the actual parent header
         engine.tip_hash = parent_hdr.compute_block_hash().unwrap();
 
-        // Create block 2 with correct prev_hash
-        let (block, hash) = make_valid_block(&vp, &vpub, 2, engine.tip_hash);
+        // Next block after genesis, with correct prev_hash
+        let (block, hash) =
+            make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT + 1, engine.tip_hash);
         engine.tracked_phase = CyclePhase::Proposal;
         engine.step(CycleEvent::BlockProposed {
             block,
@@ -3350,7 +3379,7 @@ mod tests {
         let outputs = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
         assert!(
             has_commit(&outputs),
-            "after block 1, single voter can commit"
+            "after genesis, single voter can commit"
         );
     }
 
@@ -3439,7 +3468,7 @@ mod tests {
 
         // Propose and commit block 1
         engine.tracked_phase = CyclePhase::Proposal;
-        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block, hash) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed { block, from_peer: b"p1".to_vec() });
         engine.tracked_phase = CyclePhase::Voting;
         let v1 = PorVote::sign(0, hash, &vp, vpub).unwrap();
@@ -3461,7 +3490,7 @@ mod tests {
         let (vp2, vpub2) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone(), vpub2.clone()], 2);
         engine.tracked_phase = CyclePhase::Proposal;
-        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block, hash) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed { block, from_peer: b"p1".to_vec() });
         engine.tracked_phase = CyclePhase::Voting;
         let v1 = PorVote::sign(0, hash, &vp, vpub).unwrap();
@@ -3555,7 +3584,7 @@ mod tests {
 
         // Add a candidate so the tracker isn't empty
         engine.tracked_phase = CyclePhase::Proposal;
-        let (block, _hash) = make_valid_block(&vp2, &vpub2, 1, Hash256::ZERO);
+        let (block, _hash) = make_valid_block(&vp2, &vpub2, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
@@ -3639,7 +3668,7 @@ mod tests {
 
         // Propose a candidate
         engine.tracked_phase = CyclePhase::Proposal;
-        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block, hash) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
@@ -3669,7 +3698,7 @@ mod tests {
             has_commit(&outputs),
             "R2 Strong majority should commit block"
         );
-        assert_eq!(engine.tip_height, 1);
+        assert_eq!(engine.tip_height, noble_core::GENESIS_HEIGHT);
     }
 
     // --- AUD-M7: Monotonic phase_timing ---
@@ -3692,11 +3721,12 @@ mod tests {
         engine.tracked_phase = CyclePhase::Proposal;
 
         // Create a parent block at height 1 so tip_header is set
-        let (parent_block, _parent_hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (parent_block, _parent_hash) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.update_tip_with_header(parent_block.header.clone());
 
-        // Create a block that claims prev_hash is ZERO (wrong — tip is parent_hash)
-        let (block, _) = make_valid_block(&vp, &vpub, 2, Hash256::ZERO);
+        // Correct next height, deliberately wrong prev_hash, so the prev-hash
+        // rule is the one under test rather than the height rule.
+        let (block, _) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT + 1, Hash256::ZERO);
         let outputs = engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"peer1".to_vec(),
@@ -3768,7 +3798,7 @@ mod tests {
 
         // Propose a block from the peer
         engine.tracked_phase = CyclePhase::Proposal;
-        let (block, hash) = make_valid_block(&peer_priv, &peer_pub, 1, Hash256::ZERO);
+        let (block, hash) = make_valid_block(&peer_priv, &peer_pub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
@@ -3791,7 +3821,7 @@ mod tests {
             has_commit(&outputs),
             "validator + 1 peer should reach consensus (voter_count=2, 2 unique keys)"
         );
-        assert_eq!(engine.tip_height, 1);
+        assert_eq!(engine.tip_height, noble_core::GENESIS_HEIGHT);
     }
 
     #[test]
@@ -3802,7 +3832,7 @@ mod tests {
         let mut engine = make_engine(None, &[vpub.clone()], 1);
 
         engine.tracked_phase = CyclePhase::Proposal;
-        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block, hash) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
@@ -3888,7 +3918,7 @@ mod tests {
         engine.tracked_phase = CyclePhase::Proposal;
 
         // Cycle N: propose block
-        let (block1, _hash1) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block1, _hash1) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         let block1_clone = Box::new(Block {
             header: block1.header.clone(),
             transactions: block1.transactions.clone(),
@@ -3928,7 +3958,7 @@ mod tests {
         let mut engine = make_engine(None, &[vpub.clone()], 5);
         engine.tracked_phase = CyclePhase::Proposal;
 
-        let (block, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block, _) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"peer1".to_vec(),
@@ -3953,12 +3983,12 @@ mod tests {
         let mut engine = make_engine(None, &[vpub.clone()], 5);
         engine.tracked_phase = CyclePhase::Proposal;
 
-        let (block1, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
-        let (mut block2, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (block1, _) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
+        let (mut block2, _) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         block2.header.timestamp += 1;
         let msg2 = block2.header.compute_signing_message().unwrap();
         block2.header.validator_sig = vp.sign(&msg2).unwrap();
-        let (mut block3, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (mut block3, _) = make_valid_block(&vp, &vpub, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
         block3.header.timestamp += 2;
         let msg3 = block3.header.compute_signing_message().unwrap();
         block3.header.validator_sig = vp.sign(&msg3).unwrap();

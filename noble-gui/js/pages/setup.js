@@ -88,6 +88,7 @@ export function init(root, ctx) {
     rewardSkipped: false,  // true when user chose to skip
     walletSkipped: false,  // true when user chose to skip wallet step
     p2pPort: 8780,
+    genesisSeed: '',       // [chain] genesis_seed — determines which chain this node is on
     seeds: 'node.infinitecontext.com',
     maxPeers: 50,
     // Storage
@@ -418,6 +419,7 @@ export function init(root, ctx) {
           }
         }
         state.seeds = body.querySelector('#setup-seeds')?.value?.trim() || '';
+        state.genesisSeed = body.querySelector('#setup-genesis-seed')?.value?.trim() || '';
         const maxP = parseInt(body.querySelector('#setup-max-peers')?.value, 10);
         if (!isNaN(maxP) && maxP > 0) state.maxPeers = maxP;
         break;
@@ -1318,6 +1320,19 @@ export function init(root, ctx) {
       </div>
 
       <div class="form-group">
+        <label for="setup-genesis-seed" style="font-weight:600">Genesis Seed</label>
+        <input type="text" id="setup-genesis-seed" autocomplete="off" spellcheck="false"
+          placeholder="(required to form or join a chain)"
+          value="${esc(state.genesisSeed)}"
+          style="font-family:var(--font-mono,monospace);font-size:var(--font-size-sm)">
+        <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
+          Determines the genesis block and therefore the chain ID. Every node on
+          the same chain must use the <b>same</b> seed &mdash; a different seed is a
+          different chain, not a different node. Leave empty to stay uninitialized.
+        </div>
+      </div>
+
+      <div class="form-group">
         <label for="setup-max-peers" style="font-weight:600">Max Peers</label>
         <input type="number" id="setup-max-peers" min="1" max="500" step="1"
           value="${state.maxPeers}"
@@ -1354,6 +1369,7 @@ export function init(root, ctx) {
         <dt>Encryption</dt><dd>${state.encryptionMode === 'manual' ? 'Password protected' : 'Automatic (machine key)'}</dd>
         <dt>P2P Port</dt><dd>${state.p2pPort}</dd>
         <dt>Max Peers</dt><dd>${state.maxPeers}</dd>
+        <dt>Genesis Seed</dt><dd>${state.genesisSeed ? `<span class="mono" style="font-size:var(--font-size-xs)">${esc(state.genesisSeed)}</span>` : '<span style="color:var(--warning)">(not set &mdash; node stays uninitialized)</span>'}</dd>
         <dt>Seeds</dt><dd>${state.seeds ? `<span class="mono" style="font-size:var(--font-size-xs)">${esc(state.seeds)}</span>` : '(default bootstrap)'}</dd>
       </dl>
       <div style="margin-top:var(--gap);padding:var(--gap-sm);background:var(--bg-tertiary);border-radius:var(--radius-sm);border:1px solid var(--border)">
@@ -1402,6 +1418,9 @@ export function init(root, ctx) {
       configEntries.push({ section: 'security', key: 'encryption_mode', value: state.encryptionMode });
       configEntries.push({ section: 'network', key: 'listen_addr', value: `/ip4/0.0.0.0/tcp/${state.p2pPort}` });
       configEntries.push({ section: 'network', key: 'max_peers', value: String(state.maxPeers) });
+      if (state.genesisSeed) {
+        configEntries.push({ section: 'chain', key: 'genesis_seed', value: state.genesisSeed });
+      }
 
       // Persist seed nodes to TOML (comma-separated multiaddrs).
       if (state.seeds) {

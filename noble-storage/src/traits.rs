@@ -133,6 +133,18 @@ pub trait StorageEngine {
     /// Retrieve a block hash by height.
     fn get_block_hash_by_height(&self, height: u64) -> Result<Hash256, StorageError>;
 
+    /// The chain's genesis block — its foundation, produced under the
+    /// Dual-Witness rule with `prev_block_hash = 0` and nothing before it.
+    /// Returns `None` when this node has no chain yet.
+    ///
+    /// Ask for genesis; never assume its index. Code that hardcoded height 0
+    /// as "the first block" is what destroyed a 196-block chain on 2026-08-11:
+    /// the foundation block was at height 1, index 0 held nothing, and a
+    /// rollback replaying from 0 failed *after* it had already deleted blocks.
+    /// There is no block before genesis, so its height is a fact to query, not
+    /// a constant to assume.
+    fn genesis(&self) -> Result<Option<ChainTip>, StorageError>;
+
     /// Retrieve a transaction by its tx_id.
     fn get_transaction(&self, tx_id: &Hash256) -> Result<Transaction, StorageError>;
 
@@ -145,7 +157,7 @@ pub trait StorageEngine {
     /// Get the block location of a confirmed transaction: (height, offset_in_block).
     fn get_transaction_location(&self, tx_id: &Hash256) -> Result<(u64, u32), StorageError>;
 
-    /// Get the current chain tip, or None if the chain is empty (pre-genesis).
+    /// Get the current chain tip, or None if the chain is empty (no chain yet).
     fn get_chain_tip(&self) -> Result<Option<ChainTip>, StorageError>;
 
     /// Get the balance of an address in atomic units. Returns 0 for unknown addresses.
@@ -205,7 +217,7 @@ pub trait StorageEngine {
 
     /// Wipe ALL chain data including genesis block. Used for cross-chain adoption
     /// when the node must abandon its current chain entirely and re-sync from scratch.
-    /// After this call, the storage is in a clean pre-genesis state (no chain tip).
+    /// After this call, the storage is in a clean uninitialized state (no chain tip).
     fn wipe_all_chain_data(&self) -> Result<(), StorageError>;
 
     /// Store a pending key rotation.

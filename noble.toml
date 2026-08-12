@@ -86,7 +86,12 @@ ca_store_path = ""
 [trace]
 buffer_capacity = 50000
 initial_filter = "info"
-stderr_enabled = true
+# Omitted by default: stderr fan-out follows whether stderr is a terminal, so
+# interactive runs print and service runs (launchd/systemd/docker) stay quiet.
+# That matters because the service manager's capture file is NOT rotated by
+# anything — the node's own rotating log under [logging] is the bounded one.
+# Set explicitly to true/false to override the detection.
+# stderr_enabled = true
 
 [gateway]
 key_path = ""

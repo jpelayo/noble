@@ -325,6 +325,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
             highest_known: snap.highest_known,
             progress: snap.progress,
             state: snap.state.label().to_string(),
+            severity: snap.state.severity().to_string(),
+            blocked_reason: snap.blocked_reason.clone(),
         })
     }
 

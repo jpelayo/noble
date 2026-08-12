@@ -379,6 +379,17 @@ impl StorageEngine for MemoryStorage {
         self.get_block(block_hash).map(|b| b.header)
     }
 
+    fn genesis(&self) -> Result<Option<ChainTip>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        // Lowest height present is the genesis block, wherever it sits.
+        let Some((&height, &block_hash)) = inner.block_heights.iter().min_by_key(|(h, _)| **h)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(ChainTip { block_hash, height }))
+    }
+
     fn get_block_hash_by_height(&self, height: u64) -> Result<Hash256, StorageError> {
         let inner = self.inner.read().unwrap();
         Self::check_open(&inner)?;
@@ -537,8 +548,37 @@ impl StorageEngine for MemoryStorage {
             });
         }
 
-        // Reverse blocks from tip down to target_height+1
         let tip_h = tip.height;
+
+        // PREFLIGHT — validate before mutating (mirrors RocksDB).
+        //
+        // Everything below mutates `inner` in place with no rollback, so the
+        // replay range must be proven readable while the maps are still
+        // intact. Without this, a gap anywhere in `0..=target_height` — a
+        // chain with no genesis block being the case that actually occurred —
+        // fails at the replay after the blocks have already been removed,
+        // leaving a tip that points at data this function just deleted.
+        let genesis_height = *inner
+            .block_heights
+            .keys()
+            .min()
+            .ok_or_else(|| StorageError::BlockNotFound("no genesis block".to_string()))?;
+        if target_height < genesis_height {
+            return Err(StorageError::Database(format!(
+                "cannot roll back below genesis (genesis at {genesis_height}, target {target_height})"
+            )));
+        }
+        for h in genesis_height..=target_height {
+            let hash = *inner
+                .block_heights
+                .get(&h)
+                .ok_or_else(|| StorageError::BlockNotFound(format!("height {h}")))?;
+            if !inner.blocks.contains_key(&hash) {
+                return Err(StorageError::BlockNotFound(format!("height {h}")));
+            }
+        }
+
+        // Reverse blocks from tip down to target_height+1
         for h in (target_height + 1..=tip_h).rev() {
             // 1. Reverse created outputs: remove UTXOs created at this height
             if let Some(created) = inner.created_outputs.remove(&h) {
@@ -595,8 +635,8 @@ impl StorageEngine for MemoryStorage {
         inner.issuer_index.clear();
         inner.metadata_index.clear();
 
-        // Replay address history + version chain + issuer index from 0..=target_height
-        for h in 0..=target_height {
+        // Replay address history + version chain + issuer index from genesis
+        for h in genesis_height..=target_height {
             let hash = *inner.block_heights.get(&h).ok_or_else(|| {
                 StorageError::Database(format!("missing block at height {h} during replay"))
             })?;
@@ -697,13 +737,34 @@ impl StorageEngine for MemoryStorage {
             return Ok(tip.clone());
         }
 
+        // PREFLIGHT — resolve genesis before destroying anything.
+        //
+        // The genesis lookup used to live at the end of this function, so a
+        // chain with no block 0 fell through to the error return *after* every
+        // block had already been removed from the maps. Refuse up front
+        // instead, leaving the chain intact.
+        let genesis_height = *inner
+            .block_heights
+            .keys()
+            .min()
+            .ok_or_else(|| StorageError::BlockNotFound("no genesis block".to_string()))?;
+        let genesis_hash = *inner
+            .block_heights
+            .get(&genesis_height)
+            .ok_or_else(|| StorageError::BlockNotFound("no genesis block".to_string()))?;
+        let genesis_block = inner
+            .blocks
+            .get(&genesis_hash)
+            .cloned()
+            .ok_or_else(|| StorageError::BlockNotFound("height 0".to_string()))?;
+
         tracing::warn!(
             "force_reset_to_genesis: wiping {} blocks (bypasses MAX_REORG_DEPTH)",
             tip.height
         );
 
         let tip_h = tip.height;
-        for h in 1..=tip_h {
+        for h in (genesis_height + 1)..=tip_h {
             if let Some(hash) = inner.block_heights.remove(&h) {
                 if let Some(block) = inner.blocks.remove(&hash) {
                     for tx in &block.transactions {
@@ -737,44 +798,36 @@ impl StorageEngine for MemoryStorage {
         inner.issuer_index.clear();
         inner.metadata_index.clear();
 
-        // Replay genesis (height 0) UTXO set
-        if let Some(&genesis_hash) = inner.block_heights.get(&0) {
-            if let Some(block) = inner.blocks.get(&genesis_hash).cloned() {
-                for tx in &block.transactions {
-                    let tx_id = tx
-                        .compute_tx_id(chain_id)
-                        .map_err(|e| StorageError::Codec(e.to_string()))?;
-                    let is_coinbase = tx.is_coinbase();
-                    for (vout, txout) in tx.outputs.iter().enumerate() {
-                        let outpoint = OutPoint {
-                            txid: tx_id,
-                            vout: vout as u32,
-                        };
-                        let entry = UtxoEntry {
-                            value: txout.value,
-                            address: txout.address.clone(),
-                            height: 0,
-                            is_coinbase,
-                        };
-                        inner.utxo_set.insert(outpoint.clone(), entry);
-                        inner
-                            .address_utxos
-                            .entry(txout.address.clone())
-                            .or_default()
-                            .insert(outpoint);
-                    }
-                }
+        // Replay genesis (height 0) UTXO set — resolved in the preflight above
+        for tx in &genesis_block.transactions {
+            let tx_id = tx
+                .compute_tx_id(chain_id)
+                .map_err(|e| StorageError::Codec(e.to_string()))?;
+            let is_coinbase = tx.is_coinbase();
+            for (vout, txout) in tx.outputs.iter().enumerate() {
+                let outpoint = OutPoint {
+                    txid: tx_id,
+                    vout: vout as u32,
+                };
+                let entry = UtxoEntry {
+                    value: txout.value,
+                    address: txout.address.clone(),
+                    height: 0,
+                    is_coinbase,
+                };
+                inner.utxo_set.insert(outpoint.clone(), entry);
+                inner
+                    .address_utxos
+                    .entry(txout.address.clone())
+                    .or_default()
+                    .insert(outpoint);
             }
-            inner.chain_tip = Some(ChainTip {
-                block_hash: genesis_hash,
-                height: 0,
-            });
-            Ok(inner.chain_tip.clone().unwrap())
-        } else {
-            Err(StorageError::Database(
-                "missing genesis block at height 0".into(),
-            ))
         }
+        inner.chain_tip = Some(ChainTip {
+            block_hash: genesis_hash,
+            height: genesis_height,
+        });
+        Ok(inner.chain_tip.clone().unwrap())
     }
 
     fn wipe_all_chain_data(&self) -> Result<(), StorageError> {
@@ -1793,11 +1846,12 @@ mod tests {
             prev = hash;
         }
 
-        // Heights 0..=3: height 0 gives 0 subsidy, heights 1-3 give INITIAL_SUBSIDY each
-        assert_eq!(store.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 3);
+        // Heights 0..=3, four blocks, each paying the ordinary subsidy —
+        // genesis included, since it is produced like any other block.
+        assert_eq!(store.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 4);
         store.rollback_to_height(2, test_chain_id()).unwrap();
-        // After rollback to height 2: heights 0,1,2 remain; 0 gives 0, 1-2 give INITIAL_SUBSIDY each
-        assert_eq!(store.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 2);
+        // Heights 0,1,2 remain.
+        assert_eq!(store.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 3);
     }
 
     #[test]

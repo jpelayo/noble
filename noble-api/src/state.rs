@@ -369,7 +369,7 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Whether Zstd compression is enabled on the blocks CF (from `[storage] compression`).
     pub compression_enabled: bool,
 
-    /// Chain label (hex chain ID or empty for pre-genesis).
+    /// Chain label (hex chain ID or empty for uninitialized).
     pub network_name: String,
 
     /// Hex-encoded genesis block hash for chain identity.

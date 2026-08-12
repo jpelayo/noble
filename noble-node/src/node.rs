@@ -88,7 +88,7 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub peer_info: Arc<TrackedRwLock<std::collections::HashMap<String, noble_api::state::PeerInfoEntry>>>,
     /// Active chain ID (mutable via AtomicU32 for cross-chain adoption). Shared with ApiState.
     pub chain_id: Arc<std::sync::atomic::AtomicU32>,
-    /// Chain label (hex chain ID or "pre-genesis").
+    /// Chain label (hex chain ID or "uninitialized").
     /// NOTE(stale-cache-#11): Display-only field set at startup. May become
     /// stale after cross-chain adoption changes the chain_id. The API layer
     /// rebuilds the label dynamically from `chain_id` AtomicU32, so this
@@ -127,7 +127,7 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// data it had just proven corrupt — publishing that damage to peers. While
     /// true, block proposals are suppressed; the node still serves reads and
     /// can sync, so an operator can diagnose it.
-    pub integrity_failed: std::sync::atomic::AtomicBool,
+    pub integrity_failed: Arc<std::sync::atomic::AtomicBool>,
     /// S53: Last proposed block (height, hash) — set when BroadcastBlock passes the gate.
     /// Cleared on chain tip advancement (new cycle). Shared with HealingManager.
     pub last_proposed: Arc<parking_lot::Mutex<Option<(u64, [u8; 32])>>>,
@@ -169,10 +169,15 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// `None` until `run()` spawns the worker (unit tests admit inline).
     admission_tx: Option<std::sync::mpsc::SyncSender<AdmissionJob>>,
     /// K3-04: state of an ADVERTISED-only proposal suppression episode:
-    /// `(since_epoch_secs, sync_progress_snapshot)`. If unverified claims
-    /// keep us suppressed for > 2 cycles with zero sync progress, the gate
-    /// stops honoring them (verified heights suppress indefinitely).
-    advertised_suppress: Option<(u64, u64)>,
+    /// `(since_epoch_secs, sync_progress_snapshot, blocks_delivered_snapshot)`.
+    /// If unverified claims keep us suppressed for > 2 cycles with neither sync
+    /// progress nor any block delivered, the gate stops honoring them (verified
+    /// heights suppress indefinitely).
+    ///
+    /// Delivery is tracked alongside progress because a peer that sends blocks
+    /// we reject has substantiated its chain — that is a blocked sync, not a
+    /// false claim, and lifting suppression there forks the network.
+    advertised_suppress: Option<(u64, u64, u64)>,
 }
 
 /// One relayed transaction awaiting admission on the worker (K3-02).
@@ -189,10 +194,46 @@ impl Node<MemoryStorage> {
     }
 }
 
+/// Decide whether an ADVERTISED-only proposal suppression episode has expired,
+/// and what the episode state should become.
+///
+/// Pure so the rule can be tested directly — it decides whether a node that
+/// cannot sync is allowed to start producing its own blocks, which is the
+/// difference between staying quiet and forking the network.
+///
+/// Suppression is released only when a peer's advertised height has gone
+/// *entirely* unsubstantiated for `max_secs`: no sync progress **and** no block
+/// delivered. Either one restarts the clock. Delivery counts even when we
+/// reject what was delivered — a peer handing us blocks has proven its chain
+/// exists, which is a blocked sync (an operator problem), not a false claim.
+fn advertised_suppression_expired(
+    state: Option<(u64, u64, u64)>,
+    now_secs: u64,
+    progress_now: u64,
+    delivered_now: u64,
+    max_secs: u64,
+) -> (bool, Option<(u64, u64, u64)>) {
+    match state {
+        Some((since, progress_at_start, delivered_at_start)) => {
+            if progress_now != progress_at_start || delivered_now != delivered_at_start {
+                // Substantiated — restart the clock at the new mark.
+                (false, Some((now_secs, progress_now, delivered_now)))
+            } else {
+                (
+                    now_secs.saturating_sub(since) > max_secs,
+                    Some((since, progress_at_start, delivered_at_start)),
+                )
+            }
+        }
+        None => (false, Some((now_secs, progress_now, delivered_now))),
+    }
+}
+
 impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     /// Initialize a node with the given storage backend.
     ///
-    /// The node starts stateless — no genesis is auto-committed.
+    /// The node starts with whatever chain is in storage — genesis is produced
+    /// by consensus under the Dual-Witness rule, not manufactured at startup.
     /// Subsystems (mempool, consensus, wallet) are created from the config.
     pub fn init_with_storage(
         config: &NodeConfig,
@@ -202,23 +243,24 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let storage = Arc::new(TrackedRwLock::new(LockOrder::Storage, storage));
 
-        // Derive chain_id from the earliest block hash in storage.
-        // Genesis-imported chains have block 0; consensus-bootstrapped chains start at block 1.
-        // If no blocks exist, chain_id is 0 (updated on first block commit).
+        // Derive chain_id from the genesis block — the chain's foundation,
+        // wherever it sits. Never from a hardcoded index: there is no block
+        // before genesis, so its height is queried, not assumed.
         let chain_id = {
             let s = storage.read();
-            match s.get_block_hash_by_height(0) {
-                Ok(hash) => noble_core::derive_chain_id(&hash),
-                Err(e0) => match s.get_block_hash_by_height(1) {
-                    Ok(hash) => noble_core::derive_chain_id(&hash),
-                    Err(e1) => {
-                        tracing::debug!(
-                            task = "startup",
-                            "no blocks in storage (height 0: {e0}, height 1: {e1}) — chain_id=0 (pre-genesis)",
-                        );
-                        0
-                    }
-                },
+            match s.genesis() {
+                Ok(Some(g)) => noble_core::derive_chain_id(&g.block_hash),
+                Ok(None) => {
+                    tracing::debug!(
+                        task = "startup",
+                        "no chain in storage — chain_id=0 (uninitialized)",
+                    );
+                    0
+                }
+                Err(e) => {
+                    tracing::warn!(task = "startup", "genesis lookup failed: {e} — chain_id=0");
+                    0
+                }
             }
         };
 
@@ -239,17 +281,79 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 height: 0,
             });
 
-        // Startup integrity check — detect inconsistent state (chain_tip > 0
-        // but chain_id = 0, meaning blocks are missing from storage).
-        if crate::healing::startup_integrity_check(chain_id, tip.height) {
-            if let Err(e) = storage.read().wipe_all_chain_data() {
-                tracing::error!(task = "startup", "failed to wipe inconsistent chain data: {e}");
+        // Genesis integrity — the foundation must still be the foundation.
+        //
+        // Genesis is the one block nothing can replace and nothing precedes, so
+        // its invariants are checkable in isolation: it sits at GENESIS_HEIGHT,
+        // it descends from nothing, and its own hash is the chain's identity.
+        // Verified at every startup because a chain that has lost or altered
+        // its foundation cannot be repaired by syncing — every other block
+        // descends from it.
+        let genesis_ok = {
+            let st = storage.read();
+            match st.genesis() {
+                Ok(Some(g)) => match st.get_block(&g.block_hash) {
+                    Ok(block) => {
+                        let mut ok = true;
+                        if block.header.height != noble_core::GENESIS_HEIGHT {
+                            tracing::error!(
+                                task = "integrity",
+                                "genesis is at height {} but must be at {}",
+                                block.header.height,
+                                noble_core::GENESIS_HEIGHT,
+                            );
+                            ok = false;
+                        }
+                        if block.header.prev_block_hash != Hash256::ZERO {
+                            tracing::error!(
+                                task = "integrity",
+                                "genesis claims a parent ({}) — nothing precedes genesis",
+                                block.header.prev_block_hash,
+                            );
+                            ok = false;
+                        }
+                        if noble_core::derive_chain_id(&g.block_hash) != chain_id {
+                            tracing::error!(
+                                task = "integrity",
+                                "chain id {:#010X} does not derive from genesis {}",
+                                chain_id,
+                                g.block_hash,
+                            );
+                            ok = false;
+                        }
+                        ok
+                    }
+                    Err(e) => {
+                        tracing::error!(task = "integrity", "genesis block unreadable: {e}");
+                        false
+                    }
+                },
+                // No chain yet is not a failure — there is simply no genesis
+                // to verify until this node founds or joins one.
+                Ok(None) => true,
+                Err(e) => {
+                    tracing::error!(task = "integrity", "genesis lookup failed: {e}");
+                    false
+                }
             }
-            tip = noble_storage::ChainTip {
-                block_hash: Hash256::ZERO,
-                height: 0,
-            };
+        };
+        if !genesis_ok {
+            tracing::error!(
+                task = "integrity",
+                "GENESIS INTEGRITY FAILURE — chain data preserved, block proposals \
+                 suppressed. Operator action required."
+            );
         }
+
+        // Startup integrity check — a tip above genesis with no derivable chain
+        // id means genesis is unreadable.
+        //
+        // This used to WIPE all chain data. Per ADR-031 corruption halts and
+        // preserves: the node comes up read-only with proposals suppressed so
+        // an operator can diagnose, rather than deleting the chain it was
+        // supposed to protect.
+        let startup_integrity_halt =
+            crate::healing::startup_integrity_check(chain_id, tip.height) || !genesis_ok;
 
         // AUD3-D5/D6: Load tip block header for proper B2/B3/B5/B6 validation on startup.
         let tip_header = if tip.height > 0 || tip.block_hash != Hash256::ZERO {
@@ -672,6 +776,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let sync_target_height_shared = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let sync_progress_current = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let sync_progress_total = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // L11 integrity halt — shared so the healing integrity probe can set
+        // it instead of wiping the chain (see HealingManager integrity probe).
+        // Seeded from the startup check so a node that booted with unreadable
+        // genesis is halted from the first tick, not from the first probe.
+        let integrity_failed =
+            Arc::new(std::sync::atomic::AtomicBool::new(startup_integrity_halt));
         let discovered_arc = Arc::new(Mutex::new(discovered_blockchains));
 
         let fork_strategy = crate::healing::parse_fork_resolution_strategy(
@@ -690,6 +800,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             sync_target_height_shared,
             sync_progress_current,
             sync_progress_total,
+            integrity_failed.clone(),
             fork_strategy,
             config.consensus.fork_resolution_delay_cycles,
         );
@@ -734,7 +845,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         if chain_id == 0 {
             startup_events.push(serde_json::json!({
                 "event": "startup_info",
-                "message": "Pre-genesis: no blocks yet — waiting to form or join a chain",
+                "message": "Uninitialized: no blocks yet — waiting to form or join a chain",
             }));
         } else {
             startup_events.push(serde_json::json!({
@@ -774,7 +885,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             validator_pubkey_hex: Some(node_pubkey_hex.clone()).filter(|s| !s.is_empty()),
             announce_keypair,
             clock_drift_paused: std::sync::atomic::AtomicBool::new(false),
-            integrity_failed: std::sync::atomic::AtomicBool::new(false),
+            integrity_failed,
             validator_list_path: Some(validator_list_path),
             min_fee_rate: Arc::new(std::sync::atomic::AtomicU64::new(config.consensus.min_fee_rate)),
             seed_addrs: config.network.seeds.clone(),
@@ -2296,8 +2407,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             network_name: { let cid = self.get_chain_id(); if cid != 0 { format!("{:08X}", cid) } else { "00000000".to_string() } },
             genesis_hash: {
                 let s = self.storage.read();
-                s.get_block_hash_by_height(0)
-                    .map(|h| hex::encode(h.as_bytes()))
+                s.genesis()
+                    .ok()
+                    .flatten()
+                    .map(|g| hex::encode(g.block_hash.as_bytes()))
                     .unwrap_or_default()
             },
             discovered_blockchains: self.healing.discovered_blockchains().clone(),
@@ -4197,7 +4310,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         engine.update_tip_with_header(block.header.clone());
                     }
 
-                    // Auto-update chain_id after first block commit (fixes pre-genesis → real chain).
+                    // Auto-update chain_id after first block commit (fixes uninitialized → real chain).
                     // Consensus-bootstrapped chains have no block 0 — the first committed block
                     // is height 1.  We derive chain_id from whatever the first block's hash is.
                     // CRITICAL: Must update BOTH the Node atomic AND the network service config.
@@ -4443,7 +4556,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
                 CycleIo::PhaseChanged { cycle, phase } => {
                     let phase_name = format!("{phase:?}");
-                    // Hide cycle number during pre-genesis (tip_height == 0) —
+                    // Hide cycle number during uninitialized (tip_height == 0) —
                     // the chain has no blocks yet.  Matches getCycleStatus RPC.
                     let tip_h = self.consensus.read().chain_tip().0;
                     let cycle_val: serde_json::Value = if tip_h == 0 {
@@ -4664,25 +4777,33 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     if max_advertised > tip_h {
                         const ADVERTISED_SUPPRESS_MAX_SECS: u64 =
                             2 * noble_core::CYCLE_DURATION_SECS;
+                        // Substantiation = progress OR delivery. A peer that
+                        // hands us blocks has proven its chain exists even if
+                        // we reject every one of them; only silence means the
+                        // advertised height was never backed by anything.
+                        //
+                        // Progress alone was the old test, and it is exactly
+                        // wrong when sync is *blocked* rather than stalled: on
+                        // 2026-08-11 a node that could not anchor block 1
+                        // rejected it forever, progress never moved, this timer
+                        // expired, and the node began proposing its own block 1
+                        // — forking the network instead of staying quiet.
                         let progress_now = self
                             .healing
                             .sync_progress_current()
                             .load(std::sync::atomic::Ordering::Relaxed);
-                        let expired = match self.advertised_suppress {
-                            Some((since, progress_at_start)) => {
-                                if progress_now != progress_at_start {
-                                    // Progress — restart the clock at the new mark.
-                                    self.advertised_suppress = Some((now_secs, progress_now));
-                                    false
-                                } else {
-                                    now_secs.saturating_sub(since) > ADVERTISED_SUPPRESS_MAX_SECS
-                                }
-                            }
-                            None => {
-                                self.advertised_suppress = Some((now_secs, progress_now));
-                                false
-                            }
-                        };
+                        let delivered_now = self
+                            .healing
+                            .sync_blocks_delivered()
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        let (expired, next_state) = advertised_suppression_expired(
+                            self.advertised_suppress,
+                            now_secs,
+                            progress_now,
+                            delivered_now,
+                            ADVERTISED_SUPPRESS_MAX_SECS,
+                        );
+                        self.advertised_suppress = next_state;
                         if !expired {
                             tracing::debug!(
                                 task = "sync",
@@ -5888,6 +6009,46 @@ mod tests {
     use noble_crypto::NobleSigner;
 
     #[test]
+    fn delivered_but_rejected_blocks_never_lift_proposal_suppression() {
+        const MAX: u64 = 1920; // 2 cycles
+        // Episode opens at t=0 with no progress and no deliveries yet.
+        let (expired, st) = advertised_suppression_expired(None, 0, 0, 0, MAX);
+        assert!(!expired);
+
+        // Long past the deadline, but the peer keeps delivering blocks that we
+        // keep rejecting: delivered climbs while progress stays at 0. This is
+        // the 2026-08-11 shape — sync blocked, not a lying peer — and it must
+        // NOT release the gate, or the node starts minting a rival chain.
+        let mut state = st;
+        for i in 1..=10u64 {
+            let (expired, next) =
+                advertised_suppression_expired(state, i * 1000, 0, i, MAX);
+            assert!(
+                !expired,
+                "delivery must restart the clock — a peer sending blocks has \
+                 substantiated its chain even if we reject every one"
+            );
+            state = next;
+        }
+
+        // Genuine silence: neither progress nor delivery moves past the
+        // deadline. That is an unsubstantiated claim, and the gate releases.
+        let (expired, _) = advertised_suppression_expired(
+            Some((0, 0, 10)),
+            MAX + 1,
+            0,
+            10,
+            MAX,
+        );
+        assert!(expired, "a claim backed by nothing at all must stop gating us");
+
+        // And sync progress alone also holds the gate.
+        let (expired, _) =
+            advertised_suppression_expired(Some((0, 5, 10)), MAX + 1, 6, 10, MAX);
+        assert!(!expired, "sync progress must restart the clock");
+    }
+
+    #[test]
     fn init_memory_node_starts_stateless() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
@@ -5898,7 +6059,7 @@ mod tests {
 
         // Node starts stateless — no genesis auto-committed.
         assert_eq!(node.chain_height(), 0);
-        // Pre-genesis: chain_id is 0 (derived from genesis block hash when available).
+        // Uninitialized: chain_id is 0 (derived from genesis block hash when available).
         assert_eq!(node.get_chain_id(), 0);
 
         // Mempool should be empty.
