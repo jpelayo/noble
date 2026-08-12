@@ -377,23 +377,33 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // Cycles only start once the first consensus block is committed.
         // Before that the engine uses a wall-clock-aligned epoch (cycle 0).
         //
-        // When tip.height >= 1, block 1's timestamp is the cycle epoch.
-        // When tip.height == 0, genesis_timestamp = None → engine sets wall-clock-aligned epoch on first tick.
-        let genesis_timestamp = if tip.height >= 1 {
+        // The epoch is GENESIS's timestamp, read from genesis itself.
+        //
+        // This used to require `tip.height >= 1` and read height 1. Both are
+        // wrong now: a chain consisting only of genesis has tip height 0 and
+        // would fall through to a wall-clock epoch despite having a chain, and
+        // height 1 is the block *after* genesis. A node whose epoch disagrees
+        // with its peers' computes different cycle numbers and votes in the
+        // wrong cycle.
+        // One guard, not two: `if let Ok(..) = storage.read()...` keeps the
+        // first guard alive across the body, so taking a second Storage read
+        // inside it is a recursive acquire. The lock-order tracker caught this
+        // immediately — which is the whole reason it exists.
+        let genesis_header_ts = {
             let s = storage.read();
-            match s.get_block_hash_by_height(1) {
-                Ok(hash) => match s.get_block_header(&hash) {
+            match s.genesis() {
+                Ok(Some(g)) => match s.get_block_header(&g.block_hash) {
                     Ok(header) => Some(header.timestamp),
                     Err(e) => {
-                        tracing::error!(task = "startup", "failed to load block-1 header for cycle epoch: {e}");
+                        tracing::error!(task = "startup", "failed to load genesis header for cycle epoch: {e}");
                         None
                     }
                 },
-                Err(e) => {
-                    tracing::error!(task = "startup", "failed to load block-1 hash for cycle epoch: {e}");
-                    None
-                }
+                _ => None,
             }
+        };
+        let genesis_timestamp = if let Some(ts) = genesis_header_ts {
+            Some(ts)
         } else {
             tracing::info!(
                 task = "startup",
@@ -2929,7 +2939,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         // Don't persist during bootstrap (tip=0): cycle numbers
                         // are based on a temporary epoch and become meaningless
                         // once the real chain's block 1 resets the epoch.
-                        if tip_height == 0 {
+                        if !self.consensus.read().has_chain() {
                             tracing::debug!(
                                 task = "consensus",
                                 cycle = history.cycle_number,

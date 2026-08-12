@@ -526,7 +526,11 @@ impl CycleEngine {
         // which marks it as uninitialized. first_tick re-aligns it on the next
         // engine tick. During sync import, cycle phase timing is not used, so
         // the stale window is harmless. No additional fix needed.
-        if height == 0 {
+        // Bootstrap mode is for having NO chain. Resetting to genesis leaves
+        // us with a chain — re-entering bootstrap there would relax the vote
+        // rules on a founded chain. `height == 0` stopped meaning "no chain"
+        // when genesis moved to height 0.
+        if block_hash == Hash256::ZERO {
             self.cycle_mgr.set_genesis_timestamp(u64::MAX);
             self.vote_mgr.set_bootstrap_tolerance(true);
             self.tracked_cycle = u64::MAX;
@@ -1885,7 +1889,7 @@ impl CycleEngine {
         // fewer checks. The tip header is absent only transiently (after a
         // rollback or before it is reloaded on restart), so rejecting here
         // costs at most a re-request once the context is back.
-        if parent_header.is_none() && self.tip_height > 0 {
+        if parent_header.is_none() && self.has_chain() {
             tracing::warn!(
                 "tip_header is None at tip_height {} — deferring block validation \
                  (parent header not loaded after rollback or restart)",

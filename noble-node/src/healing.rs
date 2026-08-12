@@ -657,6 +657,20 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         }
     }
 
+    /// First height to request when syncing.
+    ///
+    /// A node with no chain must start at GENESIS — it needs the foundation
+    /// before anything can descend from it. `our_height + 1` is only correct
+    /// once we already hold a chain; used unconditionally it silently skips
+    /// genesis, and every block after it is then unanchorable.
+    fn next_height_to_fetch(&self, our_height: u64) -> u64 {
+        if self.consensus.read().has_chain() {
+            our_height + 1
+        } else {
+            noble_core::GENESIS_HEIGHT
+        }
+    }
+
     /// Returns true if actively syncing (not Idle).
     pub fn is_syncing(&self) -> bool { !matches!(self.sync_state, SyncState::Idle) }
 
@@ -760,6 +774,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         // discipline as before the extraction).
         let state = decide_alignment(
             height,
+            self.consensus.read().has_chain(),
             connected_peers,
             peers_with_tip,
             highest_known,
@@ -884,10 +899,14 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     fn rollback_to(&self, height: u64) {
         let chain_id = self.get_chain_id();
         let storage = self.storage.read();
-        let result = if height > 0 {
-            storage.rollback_to_height(height, chain_id)
-        } else {
-            storage.force_reset_to_genesis(chain_id)
+        // Rolling back TO genesis is an ordinary rollback — genesis is a real
+        // block at a real height. `height > 0` treated height 0 as "no target",
+        // which under the new numbering is genesis itself.
+        let genesis_height = storage.genesis().ok().flatten().map(|g| g.height);
+        let result = match genesis_height {
+            Some(gh) if height > gh => storage.rollback_to_height(height, chain_id),
+            Some(_) => storage.force_reset_to_genesis(chain_id),
+            None => storage.force_reset_to_genesis(chain_id),
         };
         if let Err(e) = result {
             tracing::warn!(task = "healing", "rollback to {height} failed ({e}), resetting to genesis");
@@ -905,7 +924,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             }
         };
         // Load tip header before dropping storage (Storage(2) < Consensus(3) — OK).
-        let tip_header = if tip.height > 0 {
+        // A chain consisting only of genesis has tip height 0 and a perfectly
+        // real tip header. Gating on `height > 0` degraded B2/B3/B5 for it.
+        let tip_header = if tip.block_hash != Hash256::ZERO {
             match storage.get_block_header(&tip.block_hash) {
                 Ok(header) => Some(header),
                 Err(e) => {
@@ -1240,7 +1261,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                     self.sync_import_kind = match self.healing_phase {
                         HealingPhase::Resolving => SyncImportKind::ForkResolution,
                         HealingPhase::Adopting => SyncImportKind::CrossChainAdoption,
-                        _ if our_height == 0 => SyncImportKind::Bootstrap,
+                        _ if !self.consensus.read().has_chain() => SyncImportKind::Bootstrap,
                         _ => SyncImportKind::CatchUp,
                     };
                     // Transition healing phase to Syncing.
@@ -1250,7 +1271,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                         "peer {} at height {}, we're at {} ({} behind) — requesting manifest",
                         hex::encode(&peer), best_height, our_height, behind,
                     );
-                    let start = our_height + 1;
+                    let start = self.next_height_to_fetch(our_height);
                     let count = (best_height - our_height).min(MANIFEST_WINDOW as u64) as u16;
                     self.send_network(NetworkCommand::RequestSyncManifest {
                         peer_id: peer.clone(),
@@ -1503,7 +1524,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                         }
                     } else {
                         // Need next manifest window.
-                        let start = our_height + 1;
+                        let start = self.next_height_to_fetch(our_height);
                         let remaining = target - our_height;
                         let count = remaining.min(MANIFEST_WINDOW as u64) as u16;
                         self.send_network(NetworkCommand::RequestSyncManifest {
@@ -1590,7 +1611,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             Some(p) => (p, alt_height),
             None => (failed_peer, target),
         };
-        let start = our_height + 1;
+        let start = self.next_height_to_fetch(our_height);
         let count = (peer_height.saturating_sub(our_height)).min(MANIFEST_WINDOW as u64) as u16;
         self.send_network(NetworkCommand::RequestSyncManifest {
             peer_id: peer.clone(),
@@ -2216,7 +2237,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         }
 
         let (our_height, our_tip_hash) = self.consensus.read().chain_tip();
-        let tip_block_exists = if our_height > 0 {
+        // "Do we have a chain", not "is the tip above 0" — a genesis-only chain
+        // is a chain, and its integrity is exactly as worth probing.
+        let have_chain = our_tip_hash != Hash256::ZERO;
+        let tip_block_exists = if have_chain {
             self.storage.read().get_block_header(&our_tip_hash).is_ok()
         } else {
             true
@@ -2233,7 +2257,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         // everything. Damage localized to the last few blocks does not justify
         // discarding the whole chain, and losing chain_id makes the node
         // unable to rejoin the chain it was already on.
-        if our_height > 0 && !tip_block_exists {
+        if have_chain && !tip_block_exists {
             tracing::error!(
                 task = "integrity",
                 "CHAIN INTEGRITY FAILURE: tip at height {} claims hash {} but block missing from storage",
@@ -2904,7 +2928,11 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
     pub fn try_sync_import(&self, block: &noble_core::Block, vote_data: Option<&[u8]>) -> SyncImportResult {
         self.sync_blocks_delivered.fetch_add(1, Ordering::Relaxed);
-        let (tip_height, _) = self.consensus.read().chain_tip();
+        let (tip_height, have_chain) = {
+            let engine = self.consensus.read();
+            let (h, _) = engine.chain_tip();
+            (h, engine.has_chain())
+        };
         let mut chain_id = self.get_chain_id();
 
         // Genesis is the one block that cannot commit to its own chain id:
@@ -2939,7 +2967,13 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         }
 
         // Load parent header from storage for B2/B3/B5 validation.
-        let parent_header = if tip_height > 0 {
+        //
+        // The test is "do we have a chain", NOT "is the tip above 0". With
+        // genesis at height 0 those stopped being the same question, and a node
+        // holding only genesis was handed `None` here — so the block right
+        // after genesis was validated with B2/B3/B5 skipped and any parent hash
+        // accepted. That is the false-history hole H8 exists to close.
+        let parent_header = if have_chain {
             let storage = self.storage.read();
             let chain_tip = match storage.get_chain_tip() {
                 Ok(Some(t)) => t,
@@ -3059,7 +3093,15 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                     block.header.height
                 );
             }
-            return SyncImportResult::reject(RejectKind::Invalid, format!("{e}"));
+            // `is_fork` was already computed correctly right above and used
+            // only to pick a log level. A prev-hash/height disagreement is a
+            // chain disagreement — fork resolution decides it. Classifying it
+            // as Invalid sent it to the retry path, where five attempts are
+            // spent on something retrying cannot fix.
+            return SyncImportResult::reject(
+                if is_fork { RejectKind::ChainMismatch } else { RejectKind::Invalid },
+                format!("{e}"),
+            );
         }
 
         let block_hash = match block.header.compute_block_hash() {
@@ -3094,14 +3136,19 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         let new = noble_consensus::decay_vote_weight(old, 1);
         self.chain_vote_weight.store(new, Ordering::Relaxed);
 
-        // Auto-update chain_id after first sync-import.
-        let new_chain_id = if chain_id == 0 {
+        // Chain identity comes from GENESIS, and only from genesis.
+        //
+        // This used to derive it from `block_hash` — whatever block happened to
+        // import first. That was correct only while genesis was guaranteed to
+        // be that block. Deriving it from any other block stamps the node with
+        // an id no peer shares, and since tx_id commits to chain_id, every
+        // index it then writes is keyed wrongly.
+        let new_chain_id = if chain_id == 0 && block.header.height == noble_core::GENESIS_HEIGHT {
             let new_cid = noble_core::derive_chain_id(&block_hash);
             tracing::info!(
                 task = "sync_import",
-                "chain_id updated to {:#010X} after block {} sync-import",
+                "chain_id set to {:#010X} from imported genesis",
                 new_cid,
-                block.header.height,
             );
             Some(new_cid)
         } else {
@@ -3305,6 +3352,7 @@ pub fn startup_integrity_check(chain_id: u32, tip_height: u64) -> bool {
 }
 
 /// Result of a sync import attempt.
+#[derive(Debug)]
 pub enum SyncImportResult {
     /// Block was accepted and committed.
     Accepted {
@@ -3478,6 +3526,7 @@ pub(crate) fn compute_fork_groups(
 /// `majority` → storage lock, returning `(agreeing, ahead_same_chain)`).
 fn decide_alignment(
     height: u64,
+    have_chain: bool,
     connected_peers: usize,
     peers_with_tip: usize,
     highest_known: u64,
@@ -3496,9 +3545,9 @@ fn decide_alignment(
         AlignmentState::Isolated
     } else if highest_known.saturating_sub(height) > ALIGNMENT_SYNC_GAP_BLOCKS {
         AlignmentState::Syncing
-    } else if height == 0 && !has_proposals {
+    } else if !have_chain && !has_proposals {
         AlignmentState::Bootstrapping
-    } else if height == 0 {
+    } else if !have_chain {
         AlignmentState::Creating
     } else if peers_with_tip == 0 {
         // Connected peers but none have announced chain tips yet. Evidence-free
@@ -3554,11 +3603,11 @@ mod tests {
     #[test]
     fn alignment_isolated_when_no_peers() {
         assert_eq!(
-            decide_alignment(0, 0, 0, 0, false, unreachable_dwell, unreachable_maj),
+            decide_alignment(0, false, 0, 0, 0, false, unreachable_dwell, unreachable_maj),
             AlignmentState::Isolated
         );
         assert_eq!(
-            decide_alignment(5, 0, 0, 5, false, unreachable_dwell, unreachable_maj),
+            decide_alignment(5, true, 0, 0, 5, false, unreachable_dwell, unreachable_maj),
             AlignmentState::Isolated
         );
     }
@@ -3566,12 +3615,134 @@ mod tests {
     #[test]
     fn alignment_bootstrapping_and_creating_at_height_zero() {
         assert_eq!(
-            decide_alignment(0, 2, 0, 0, false, unreachable_dwell, unreachable_maj),
+            decide_alignment(0, false, 2, 0, 0, false, unreachable_dwell, unreachable_maj),
             AlignmentState::Bootstrapping
         );
         assert_eq!(
-            decide_alignment(0, 2, 0, 0, true, unreachable_dwell, unreachable_maj),
+            decide_alignment(0, false, 2, 0, 0, true, unreachable_dwell, unreachable_maj),
             AlignmentState::Creating
+        );
+    }
+
+    // ── Bootstrap & sync seams (2026-08-12) ──
+    //
+    // These exercise the two lifecycles the product depends on and that had no
+    // coverage at all: founding a chain, and joining one from empty. Every
+    // defect they pin was live in a suite that was otherwise green.
+
+    /// Commit a genesis block directly and point consensus at it, producing the
+    /// "genesis only" state — a real chain whose tip height is 0.
+    fn found_chain(h: &mut HealingManager<MemoryStorage>) -> (Hash256, u32) {
+        // Use the shared test genesis so the chain id the fixtures sign with
+        // (`test_chain_id()`) is exactly the one derived from this genesis.
+        // Otherwise every later block fails on merkle mismatch before reaching
+        // the rule under test — which is how the first version of this test
+        // passed while proving nothing.
+        let block = noble_test_utils::fixtures::test_genesis_block();
+        let hash = noble_test_utils::fixtures::test_genesis_hash();
+        assert_eq!(block.header.height, noble_core::GENESIS_HEIGHT);
+        h.storage
+            .read()
+            .commit_block(&block, &hash, &[])
+            .expect("genesis commits");
+        h.consensus
+            .write()
+            .reset_tip(noble_core::GENESIS_HEIGHT, hash, true)
+            .expect("tip set to genesis");
+        let cid = noble_core::derive_chain_id(&hash);
+        assert_eq!(cid, noble_test_utils::fixtures::test_chain_id());
+        h.update_chain_id(cid);
+        (hash, cid)
+    }
+
+    #[test]
+    fn block_after_genesis_is_validated_against_its_parent() {
+        // B4: a node holding only genesis has tip_height == 0, which the sync
+        // path read as "no chain, therefore no parent header" — so the block
+        // right after genesis was validated with B2/B3/B5 SKIPPED. That is the
+        // false-history hole H8 exists to close, reopened by the renumbering.
+        let mut h = make_healing_manager();
+        let (genesis_hash, _) = found_chain(&mut h);
+
+        let validator = noble_test_utils::fixtures::TestKeypair::generate();
+        // Correct height, deliberately wrong parent.
+        let (bad, _hash, _ids) = noble_test_utils::fixtures::make_block_with_coinbase(
+            vec![],
+            noble_core::GENESIS_HEIGHT + 1,
+            Hash256::from_bytes([0xAB; 32]),
+            noble_core::GENESIS_TIMESTAMP + 960,
+            &validator,
+            &[],
+        );
+        assert_ne!(bad.header.prev_block_hash, genesis_hash);
+
+        let result = h.try_sync_import(&bad, None);
+        // The REASON matters. A rejection for some unrelated rule (reward
+        // arithmetic, timestamp) would leave the parent check still skipped
+        // while the test looked green.
+        match result {
+            SyncImportResult::Rejected { ref reason, kind } => {
+                eprintln!("REJECT kind={kind:?} reason={reason}");
+                assert_eq!(
+                    kind,
+                    RejectKind::ChainMismatch,
+                    "must be rejected for not descending from genesis, got: {reason}"
+                );
+            }
+            other => panic!("must be rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chain_id_comes_from_genesis_not_from_the_first_block_imported() {
+        // B2: chain_id was derived from whatever block arrived first. That was
+        // only ever correct while genesis WAS the first block.
+        let mut h = make_healing_manager();
+        let (genesis_hash, _) = found_chain(&mut h);
+        let expected = noble_core::derive_chain_id(&genesis_hash);
+        assert_eq!(h.get_chain_id(), expected);
+
+        // Import the next block; the chain id must not be re-derived from it.
+        let validator = noble_test_utils::fixtures::TestKeypair::generate();
+        let (next, _hash, _ids) = noble_test_utils::fixtures::make_block_with_coinbase(
+            vec![],
+            noble_core::GENESIS_HEIGHT + 1,
+            genesis_hash,
+            noble_core::GENESIS_TIMESTAMP + 960,
+            &validator,
+            &[],
+        );
+        let _ = h.try_sync_import(&next, None);
+        assert_eq!(
+            h.get_chain_id(),
+            expected,
+            "chain id must stay derived from genesis"
+        );
+    }
+
+    #[test]
+    fn a_node_with_no_chain_syncs_from_genesis() {
+        // B1: `our_height + 1` yields 1 when there is no chain, so genesis at
+        // height 0 was never requested and a joining node could never obtain
+        // the block everything else descends from.
+        let h = make_healing_manager();
+        assert_eq!(
+            h.next_height_to_fetch(0),
+            noble_core::GENESIS_HEIGHT,
+            "a node with no chain must request genesis first"
+        );
+    }
+
+    #[test]
+    fn a_node_holding_only_genesis_continues_from_genesis() {
+        // The "genesis only" state is real and normal, and must not be
+        // mistaken for "no chain": the next block to fetch is genesis + 1.
+        let mut h = make_healing_manager();
+        let _ = found_chain(&mut h);
+        assert_eq!(
+            h.next_height_to_fetch(noble_core::GENESIS_HEIGHT),
+            noble_core::GENESIS_HEIGHT + 1,
+            "a node holding genesis must continue after it, not refetch it"
         );
     }
 
@@ -3649,13 +3820,25 @@ mod tests {
         // while the sync banner said "catching up to 197". Both were rendered
         // at once, and the node really was trying to do both.
         assert_eq!(
-            decide_alignment(0, 1, 1, 197, true, unreachable_dwell, unreachable_maj),
+            decide_alignment(0, false, 1, 1, 197, true, unreachable_dwell, unreachable_maj),
             AlignmentState::Syncing
         );
         // Also with no proposals seen: still joining, not bootstrapping.
         assert_eq!(
-            decide_alignment(0, 1, 1, 197, false, unreachable_dwell, unreachable_maj),
+            decide_alignment(0, false, 1, 1, 197, false, unreachable_dwell, unreachable_maj),
             AlignmentState::Syncing
+        );
+    }
+
+    #[test]
+    fn a_genesis_only_chain_is_not_reported_as_having_no_chain() {
+        // A chain consisting of genesis alone sits at height 0. Before
+        // `have_chain` was explicit, that was read as "forming a chain" — the
+        // node claimed to be bootstrapping a chain it had already founded.
+        assert_eq!(
+            decide_alignment(0, true, 2, 2, 0, true, dwell(false), maj(1, 0)),
+            AlignmentState::Aligned,
+            "a founded chain must not report as still forming"
         );
     }
 
@@ -3664,11 +3847,11 @@ mod tests {
         // The Syncing reorder must not swallow genuine chain formation: peers
         // present, nobody ahead, so this really is a chain being created.
         assert_eq!(
-            decide_alignment(0, 2, 2, 0, true, unreachable_dwell, unreachable_maj),
+            decide_alignment(0, false, 2, 2, 0, true, unreachable_dwell, unreachable_maj),
             AlignmentState::Creating
         );
         assert_eq!(
-            decide_alignment(0, 2, 2, 0, false, unreachable_dwell, unreachable_maj),
+            decide_alignment(0, false, 2, 2, 0, false, unreachable_dwell, unreachable_maj),
             AlignmentState::Bootstrapping
         );
     }
@@ -3679,7 +3862,7 @@ mod tests {
         // (Previously returned Aligned — two nodes 22 blocks apart both
         // showed "ALIGNED".)
         assert_eq!(
-            decide_alignment(2751, 1, 0, 2751, false, unreachable_dwell, unreachable_maj),
+            decide_alignment(2751, true, 1, 0, 2751, false, unreachable_dwell, unreachable_maj),
             AlignmentState::Verifying
         );
     }
@@ -3689,14 +3872,14 @@ mod tests {
         // Gap ≤ 2 (one-block tip race territory): not Syncing.
         for gap in 0..=ALIGNMENT_SYNC_GAP_BLOCKS {
             assert_eq!(
-                decide_alignment(100, 1, 1, 100 + gap, false, dwell(false), maj(1, 0)),
+                decide_alignment(100, true, 1, 1, 100 + gap, false, dwell(false), maj(1, 0)),
                 AlignmentState::Aligned,
                 "gap {gap} must stay Aligned"
             );
         }
         // Gap 3: Syncing — no more hiding hours of lag behind a green badge.
         assert_eq!(
-            decide_alignment(100, 1, 1, 100 + ALIGNMENT_SYNC_GAP_BLOCKS + 1, false, unreachable_dwell, unreachable_maj),
+            decide_alignment(100, true, 1, 1, 100 + ALIGNMENT_SYNC_GAP_BLOCKS + 1, false, unreachable_dwell, unreachable_maj),
             AlignmentState::Syncing
         );
     }
@@ -3704,7 +3887,7 @@ mod tests {
     #[test]
     fn alignment_dwell_forces_diverged() {
         assert_eq!(
-            decide_alignment(100, 2, 2, 100, false, dwell(true), unreachable_maj),
+            decide_alignment(100, true, 2, 2, 100, false, dwell(true), unreachable_maj),
             AlignmentState::Diverged
         );
     }
@@ -3713,17 +3896,17 @@ mod tests {
     fn alignment_majority_paths() {
         // Majority agrees, someone ahead within tolerance → CatchingUp.
         assert_eq!(
-            decide_alignment(100, 2, 2, 101, false, dwell(false), maj(2, 1)),
+            decide_alignment(100, true, 2, 2, 101, false, dwell(false), maj(2, 1)),
             AlignmentState::CatchingUp
         );
         // Majority agrees, nobody ahead → Aligned.
         assert_eq!(
-            decide_alignment(100, 2, 2, 100, false, dwell(false), maj(2, 0)),
+            decide_alignment(100, true, 2, 2, 100, false, dwell(false), maj(2, 0)),
             AlignmentState::Aligned
         );
         // Minority (0 agreeing of 2 with tips: 1+0=1 vs 3) → Diverged.
         assert_eq!(
-            decide_alignment(100, 2, 2, 100, false, dwell(false), maj(0, 0)),
+            decide_alignment(100, true, 2, 2, 100, false, dwell(false), maj(0, 0)),
             AlignmentState::Diverged
         );
     }
