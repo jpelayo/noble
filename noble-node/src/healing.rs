@@ -657,6 +657,20 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         }
     }
 
+    /// Hash the current manifest promised for `height`, if we are in
+    /// manifest-driven sync.
+    fn manifest_hash_for(&self, height: u64) -> Option<[u8; 32]> {
+        if let SyncState::Fetching { ref manifest, .. } = self.sync_state {
+            manifest
+                .iter()
+                .find(|e| e.height == height)
+                .map(|e| e.hash)
+                .filter(|h| *h != [0u8; 32])
+        } else {
+            None
+        }
+    }
+
     /// First height to request when syncing.
     ///
     /// A node with no chain must start at GENESIS — it needs the foundation
@@ -668,6 +682,14 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             our_height + 1
         } else {
             noble_core::GENESIS_HEIGHT
+        }
+    }
+
+    /// Peer we are currently syncing from, if any.
+    fn sync_peer(&self) -> Option<&Vec<u8>> {
+        match &self.sync_state {
+            SyncState::Fetching { peer, .. } | SyncState::AwaitingManifest { peer, .. } => Some(peer),
+            SyncState::Idle => None,
         }
     }
 
@@ -1696,6 +1718,19 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         // Clear the failure streak so transient blips don't accrue toward a drop.
         self.sync_failure_streak = 0;
 
+        // A block hash is a SHA-256 digest; all-zeros cannot occur. A peer
+        // sending one is either broken or trying to blank the hash we bind
+        // genesis against, so the manifest is refused rather than trusted in
+        // part.
+        if entries.iter().any(|(_, hash)| matches!(hash, Some(h) if *h == [0u8; 32])) {
+            tracing::warn!(
+                task = "sync",
+                "manifest contains an all-zero block hash — refusing it"
+            );
+            self.reset_sync_idle();
+            return;
+        }
+
         // Filter out entries with no hash (peer doesn't have those blocks).
         let manifest: Vec<ManifestEntry> = entries
             .iter()
@@ -1793,6 +1828,46 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                         // No genesis: no peer and no number of retries can fix
                         // this, so don't burn attempts pretending otherwise.
                         // Stop the conveyor and tell the operator what to do.
+                        RejectKind::GenesisWitnessMissing => {
+                            // Re-request genesis explicitly by height — that
+                            // path serves `get_block_votes`, batch sync does
+                            // not. Reuse the ordinary retry accounting so this
+                            // still escalates if no peer ever supplies one.
+                            let attempts = match manifest[*cursor].status {
+                                EntryStatus::Failed { attempts } => attempts + 1,
+                                _ => 1,
+                            };
+                            tracing::warn!(
+                                task = "sync",
+                                "genesis served without its witness record (attempt {attempts}) \
+                                 — re-requesting by height: {reason}",
+                            );
+                            manifest[*cursor].status = EntryStatus::Failed { attempts };
+                            if let Some(peer) = self.sync_peer().cloned() {
+                                self.send_network(NetworkCommand::RequestBlockByHeight {
+                                    peer_id: peer,
+                                    height: noble_core::GENESIS_HEIGHT,
+                                });
+                            }
+                        }
+                        RejectKind::GenesisUnacceptable => {
+                            tracing::error!(
+                                task = "sync",
+                                "cannot join this chain: {reason}. Its genesis does not meet the \
+                                 Dual-Witness Rule, so nothing descending from it can be trusted. \
+                                 This is not retryable — the chain itself must be re-founded, or \
+                                 this node pointed at a different peer."
+                            );
+                            self.blocked_reason = Some(format!("Cannot join chain — {reason}"));
+                            self.broadcast_event(serde_json::json!({
+                                "event": "sync_blocked",
+                                "height": height,
+                                "reason": reason,
+                                "message": "Cannot join chain — genesis is not properly witnessed",
+                            }));
+                            self.reset_sync_idle();
+                            return;
+                        }
                         RejectKind::NoGenesis => {
                             tracing::error!(
                                 task = "sync",
@@ -3036,10 +3111,121 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                     );
                 }
             }
-            // No chain yet: this genesis is accepted on its Dual-Witness
-            // certificate, verified below with every other block rule. That
-            // certificate is the anchor an open network has; nothing is
-            // configured out of band.
+            // No chain yet: we are being handed someone else's foundation.
+            //
+            // The consensus engine enforces Dual-Witness when a chain is
+            // FOUNDED, but sync import bypasses the engine entirely — so
+            // without this check a joining node accepts a genesis that was
+            // never witnessed by anyone, which is a chain founded by one node.
+            // The witness certificate is the only evidence available to a node
+            // that was not present at founding, so it is mandatory here, is
+            // verified BEFORE commit, and must clear the same threshold the
+            // engine applies.
+            else {
+                // Bind genesis to the hash the manifest promised.
+                //
+                // Every other height is bound by its parent link (B2): a
+                // substituted block fails because it does not chain to what we
+                // already hold. Genesis has no parent, so without this a peer
+                // can advertise one chain in its manifest and deliver a
+                // different — even properly witnessed — foundation, and the
+                // joining node adopts the chain it was not asked to join.
+                let Some(promised) = self.manifest_hash_for(noble_core::GENESIS_HEIGHT) else {
+                    // No manifest naming a genesis means nothing to bind
+                    // against — this block was pushed at us, not requested.
+                    // Adopting a foundation opportunistically is how a node
+                    // ends up on a chain it never chose; wait for the manifest
+                    // that names one. Retryable: the manifest is in flight.
+                    return SyncImportResult::reject(
+                        RejectKind::GenesisWitnessMissing,
+                        "refusing to adopt a genesis that no manifest asked for — \
+                         awaiting a manifest to bind against",
+                    );
+                };
+                {
+                    let incoming = match block.header.compute_block_hash() {
+                        Ok(h) => h,
+                        Err(e) => {
+                            return SyncImportResult::reject(
+                                RejectKind::Invalid,
+                                format!("genesis hash computation failed: {e}"),
+                            )
+                        }
+                    };
+                    if incoming.as_bytes() != &promised {
+                        tracing::warn!(
+                            task = "sync_import",
+                            "peer delivered genesis {incoming} but its manifest promised {} \
+                             — refusing to adopt a foundation we did not ask for",
+                            hex::encode(promised),
+                        );
+                        return SyncImportResult::reject(
+                            RejectKind::GenesisUnacceptable,
+                            "genesis does not match the hash this peer's own manifest promised",
+                        );
+                    }
+                }
+
+                let required = self.consensus.read().min_unique_voters();
+                let cert = match vote_data {
+                    Some(vd) => match <noble_consensus::BlockVotes as noble_codec::NobleCbor>::from_cbor(vd) {
+                        Ok(parsed) => parsed.certificate,
+                        Err(e) => {
+                            return SyncImportResult::reject(
+                                RejectKind::Invalid,
+                                format!("genesis witness data undecodable: {e}"),
+                            )
+                        }
+                    },
+                    None => None,
+                };
+                let Some(cert) = cert else {
+                    return SyncImportResult::reject(
+                        RejectKind::GenesisWitnessMissing,
+                        "genesis arrived without its witness record — re-requesting over the \
+                         vote-carrying path",
+                    );
+                };
+                let incoming = match block.header.compute_block_hash() {
+                    Ok(h) => h,
+                    Err(e) => {
+                        return SyncImportResult::reject(
+                            RejectKind::Invalid,
+                            format!("genesis hash computation failed: {e}"),
+                        )
+                    }
+                };
+                if cert.candidate_hash != incoming {
+                    return SyncImportResult::reject(
+                        RejectKind::GenesisUnacceptable,
+                        "genesis witness certificate names a different block",
+                    );
+                }
+                match cert.verify() {
+                    Ok(witnesses) if witnesses >= required => {
+                        tracing::info!(
+                            task = "sync_import",
+                            "adopting genesis {incoming} witnessed by {witnesses} distinct \
+                             validator(s) (>= {required} required)"
+                        );
+                    }
+                    Ok(witnesses) => {
+                        return SyncImportResult::reject(
+                            RejectKind::GenesisUnacceptable,
+                            format!(
+                                "genesis witnessed by only {witnesses} distinct validator(s), \
+                                 {required} required by the Dual-Witness Rule"
+                            ),
+                        )
+                    }
+                    Err(e) => {
+                        return SyncImportResult::reject(
+                            RejectKind::GenesisUnacceptable,
+                            format!("genesis witness certificate does not verify: {e}"),
+                        )
+                    }
+                }
+            }
         }
 
         let validator_list = self.consensus.read().validator_snapshot()
@@ -3373,6 +3559,20 @@ pub enum RejectKind {
     /// The block doesn't chain to what we have — a genuine fork/origin
     /// disagreement that fork resolution must decide, not a retry.
     ChainMismatch,
+    /// The genesis this peer offers cannot be accepted — its certificate is
+    /// present but invalid, mismatched, or short of the Dual-Witness
+    /// threshold. Terminal: that is a statement about the CHAIN, and no
+    /// number of retries changes it.
+    GenesisUnacceptable,
+    /// Genesis arrived with no witness record at all.
+    ///
+    /// Retryable, and the distinction matters: whether a certificate arrives
+    /// depends on which path served the block. `GetBlockByHeight` carries vote
+    /// data; batch sync does not (`vote_data: None` — service.rs). Treating
+    /// absence as terminal makes an HONEST peer that happened to answer by
+    /// batch permanently unjoinable, which blames the chain for a transport
+    /// choice. Re-request over the vote-carrying path first.
+    GenesisWitnessMissing,
     /// We have no genesis block, so the chain's origin cannot be anchored. Retrying
     /// cannot help; the operator must configure `[chain] genesis_seed`.
     NoGenesis,
@@ -3653,6 +3853,381 @@ mod tests {
         assert_eq!(cid, noble_test_utils::fixtures::test_chain_id());
         h.update_chain_id(cid);
         (hash, cid)
+    }
+
+    /// Put the manager in the state a real joining node is in when genesis
+    /// arrives: syncing, with a manifest that names the genesis we asked for.
+    /// Genesis is only ever adopted against such a promise.
+    fn expect_genesis(h: &mut HealingManager<MemoryStorage>, promised: Hash256) {
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(promised.as_bytes());
+        h.sync_state = SyncState::Fetching {
+            peer: vec![1, 2, 3],
+            target: 2,
+            manifest: vec![ManifestEntry {
+                height: noble_core::GENESIS_HEIGHT,
+                hash,
+                status: EntryStatus::Requested { at: 0 },
+            }],
+            cursor: 0,
+        };
+    }
+
+    /// Build a signed witness certificate for `candidate` from `n` distinct
+    /// validators, as a CBOR `BlockVotes` blob (what sync carries).
+    fn witness_blob(candidate: Hash256, n: usize) -> Vec<u8> {
+        use noble_codec::NobleCbor;
+        let mut votes = Vec::new();
+        for _ in 0..n {
+            let (sk, pk) = noble_crypto::secp256k1::generate_keypair();
+            let priv_key = noble_crypto::NoblePrivateKey::Secp256k1(sk);
+            let pub_key = noble_crypto::NoblePublicKey::Secp256k1(pk);
+            votes.push(
+                noble_consensus::PorVote::sign(0, candidate, &priv_key, pub_key)
+                    .expect("vote signs"),
+            );
+        }
+        let bv = noble_consensus::BlockVotes {
+            cycle_number: 0,
+            voter_count: n,
+            strength: "Strong".to_string(),
+            r1_voters: vec![],
+            r2_voters: vec![],
+            unique_witness_count: n,
+            dual_witness_required: true,
+            dual_witness_met: true,
+            certificate: Some(noble_consensus::history::WitnessCertificate {
+                cycle: 0,
+                candidate_hash: candidate,
+                votes,
+            }),
+        };
+        bv.to_cbor().expect("blob encodes")
+    }
+
+    #[test]
+    fn a_founded_genesis_survives_restart_and_can_be_joined() {
+        // I2: startup HALTS a node whose genesis cannot show a valid
+        // certificate. So if founding stores one that later fails
+        // verification, the founding node bricks itself on its own valid
+        // chain — and no peer can join it either. Prove the round trip:
+        // store what founding stores, verify it the way startup does, then
+        // hand the same pair to a second node's sync import.
+        use noble_codec::NobleCbor;
+
+        let h = make_healing_manager();
+        let block = noble_test_utils::fixtures::test_genesis_block();
+        let hash = noble_test_utils::fixtures::test_genesis_hash();
+        let required = h.consensus.read().min_unique_voters();
+
+        // What the engine persists at commit.
+        let blob = witness_blob(hash, required);
+        h.storage.read().commit_block(&block, &hash, &[]).expect("genesis commits");
+        h.storage
+            .read()
+            .store_block_votes(noble_core::GENESIS_HEIGHT, &blob)
+            .expect("witness record persists");
+
+        // --- what startup does on the next boot ---
+        let raw = h
+            .storage
+            .read()
+            .get_block_votes(noble_core::GENESIS_HEIGHT)
+            .expect("readable")
+            .expect("genesis must have a stored witness record");
+        let bv = <noble_consensus::BlockVotes as NobleCbor>::from_cbor(&raw).expect("decodes");
+        let cert = bv.certificate.expect("genesis must carry a certificate");
+        assert_eq!(cert.candidate_hash, hash, "certificate must name genesis");
+        let witnesses = cert.verify().expect("stored certificate must verify after a restart");
+        assert!(
+            witnesses >= required,
+            "stored genesis certificate must still meet the Dual-Witness threshold"
+        );
+
+        // --- what a JOINING node does with the same pair ---
+        let mut joiner = make_healing_manager();
+        expect_genesis(&mut joiner, hash);
+        let result = joiner.try_sync_import(&block, Some(&raw));
+        assert!(
+            matches!(result, SyncImportResult::Accepted { .. }),
+            "a genesis good enough to keep must be good enough to join, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_genesis_certificate_triggers_a_re_request_by_height() {
+        // Classifying a missing certificate as retryable is only useful if the
+        // node then actually re-asks over the path that CARRIES certificates.
+        // `GetBlocks` (batch, and the by-hash retry) has no slot for vote data;
+        // only `GetBlockByHeight` serves `get_block_votes`. Without this the
+        // "retryable" classification would just re-request over the same
+        // voteless path forever.
+        let (net_tx, mut net_rx) = mpsc::channel(32);
+        let (blk_tx, _) = broadcast::channel(32);
+        let (phase_tx, _) = broadcast::channel(32);
+        let mut h = make_healing_manager();
+        h.set_io_channels(net_tx, blk_tx, phase_tx, None);
+
+        // Put the conveyor in Fetching with genesis outstanding.
+        h.sync_state = SyncState::Fetching {
+            peer: vec![9, 9, 9],
+            target: 3,
+            manifest: vec![ManifestEntry {
+                height: noble_core::GENESIS_HEIGHT,
+                hash: [0u8; 32],
+                status: EntryStatus::Requested { at: 0 },
+            }],
+            cursor: 0,
+        };
+
+        // Drive the conveyor with the refusal a voteless genesis produces.
+        let block = noble_test_utils::fixtures::test_genesis_block();
+        let result = h.try_sync_import(&block, None);
+        assert!(
+            matches!(result, SyncImportResult::Rejected { kind: RejectKind::GenesisWitnessMissing, .. }),
+            "precondition: a voteless genesis is refused as retryable"
+        );
+        h.advance_after_import(noble_core::GENESIS_HEIGHT, &result, 0);
+
+        let mut asked_for_genesis_by_height = false;
+        while let Ok(cmd) = net_rx.try_recv() {
+            if let NetworkCommand::RequestBlockByHeight { height, .. } = cmd {
+                if height == noble_core::GENESIS_HEIGHT {
+                    asked_for_genesis_by_height = true;
+                }
+            }
+        }
+        assert!(
+            asked_for_genesis_by_height,
+            "a genesis served without its certificate must be re-requested by height"
+        );
+    }
+
+    #[test]
+    fn a_manifest_with_an_all_zero_hash_is_refused() {
+        // A block hash is a SHA-256 digest — all-zeros cannot occur. Accepting
+        // one would have let a peer blank the very field genesis is bound
+        // against, silently disabling the binding.
+        let mut h = make_healing_manager();
+        h.sync_state = SyncState::AwaitingManifest {
+            peer: vec![4, 5, 6],
+            target: 3,
+            requested_at: 0,
+        };
+        h.on_manifest_received(
+            &[4, 5, 6],
+            &[
+                (noble_core::GENESIS_HEIGHT, Some([0u8; 32])),
+                (1, Some([0xAB; 32])),
+            ],
+            0,
+        );
+        assert!(
+            matches!(h.sync_state, SyncState::Idle),
+            "a manifest containing an impossible hash must be refused outright"
+        );
+    }
+
+    #[test]
+    fn genesis_pushed_without_a_manifest_is_not_adopted() {
+        // Nothing to bind against means the block was pushed at us, not asked
+        // for. Adopting opportunistically is how a node lands on a chain it
+        // never chose — retryable, so the manifest can still arrive.
+        let h = make_healing_manager();
+        let block = noble_test_utils::fixtures::test_genesis_block();
+        let hash = noble_test_utils::fixtures::test_genesis_hash();
+        let blob = witness_blob(hash, h.consensus.read().min_unique_voters());
+        match h.try_sync_import(&block, Some(&blob)) {
+            SyncImportResult::Rejected { ref reason, kind } => {
+                assert_eq!(kind, RejectKind::GenesisWitnessMissing, "{reason}");
+                assert!(reason.contains("no manifest asked for"), "got: {reason}");
+            }
+            other => panic!("an unrequested genesis must not be adopted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_peer_cannot_deliver_a_genesis_its_manifest_did_not_promise() {
+        // Every height above genesis is bound by its parent link: a substituted
+        // block fails B2 because it does not chain to what we hold. Genesis has
+        // no parent, so it needs explicit binding — otherwise a peer advertises
+        // one chain and delivers another, properly witnessed, and the joining
+        // node adopts a chain it never asked to join.
+        let mut h = make_healing_manager();
+        let real = noble_test_utils::fixtures::test_genesis_block();
+        let real_hash = noble_test_utils::fixtures::test_genesis_hash();
+
+        // The manifest promises a DIFFERENT genesis than the peer will deliver.
+        h.sync_state = SyncState::Fetching {
+            peer: vec![7, 7, 7],
+            target: 2,
+            manifest: vec![ManifestEntry {
+                height: noble_core::GENESIS_HEIGHT,
+                hash: [0xC3; 32],
+                status: EntryStatus::Requested { at: 0 },
+            }],
+            cursor: 0,
+        };
+
+        // Even WITH a valid two-witness certificate, the swap must be refused.
+        let blob = witness_blob(real_hash, h.consensus.read().min_unique_voters());
+        match h.try_sync_import(&real, Some(&blob)) {
+            SyncImportResult::Rejected { ref reason, kind } => {
+                assert_eq!(
+                    kind,
+                    RejectKind::GenesisUnacceptable,
+                    "a substituted genesis must be terminal: {reason}"
+                );
+                assert!(
+                    reason.contains("manifest"),
+                    "the reason must name the broken promise, got: {reason}"
+                );
+            }
+            other => panic!("substituted genesis must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_promised_genesis_is_still_accepted() {
+        // The binding must not reject the genesis we actually asked for.
+        let mut h = make_healing_manager();
+        let real = noble_test_utils::fixtures::test_genesis_block();
+        let real_hash = noble_test_utils::fixtures::test_genesis_hash();
+        let mut promised = [0u8; 32];
+        promised.copy_from_slice(real_hash.as_bytes());
+
+        h.sync_state = SyncState::Fetching {
+            peer: vec![7, 7, 7],
+            target: 2,
+            manifest: vec![ManifestEntry {
+                height: noble_core::GENESIS_HEIGHT,
+                hash: promised,
+                status: EntryStatus::Requested { at: 0 },
+            }],
+            cursor: 0,
+        };
+
+        let blob = witness_blob(real_hash, h.consensus.read().min_unique_voters());
+        let result = h.try_sync_import(&real, Some(&blob));
+        assert!(
+            matches!(result, SyncImportResult::Accepted { .. }),
+            "the genesis the manifest promised must be adoptable, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn synced_genesis_without_witnesses_is_refused() {
+        // The engine enforces Dual-Witness when FOUNDING, but sync import
+        // bypasses the engine. Without this check a joining node adopts a
+        // foundation nobody witnessed — a chain founded by one node.
+        let mut h = make_healing_manager();
+        let block = noble_test_utils::fixtures::test_genesis_block();
+        expect_genesis(&mut h, noble_test_utils::fixtures::test_genesis_hash());
+
+        // No witness data at all: refused, but RETRYABLE — absence depends on
+        // which path served the block, not on the chain. `GetBlockByHeight`
+        // carries vote data; batch sync does not. Making absence terminal would
+        // let an honest peer that answered by batch render the chain
+        // permanently unjoinable.
+        match h.try_sync_import(&block, None) {
+            SyncImportResult::Rejected { ref reason, kind } => {
+                assert_eq!(
+                    kind,
+                    RejectKind::GenesisWitnessMissing,
+                    "a missing witness record must be retryable, not terminal: {reason}"
+                );
+            }
+            other => panic!("unwitnessed genesis must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bad_genesis_certificate_is_terminal_but_a_missing_one_is_not() {
+        // The two must not be conflated. "Present but insufficient" is a
+        // statement about the CHAIN and no retry changes it. "Absent" is a
+        // statement about the TRANSPORT and must be retried over the path that
+        // carries votes.
+        let mut h = make_healing_manager();
+        let block = noble_test_utils::fixtures::test_genesis_block();
+        let hash = noble_test_utils::fixtures::test_genesis_hash();
+        expect_genesis(&mut h, hash);
+
+        match h.try_sync_import(&block, None) {
+            SyncImportResult::Rejected { kind, .. } => {
+                assert_eq!(kind, RejectKind::GenesisWitnessMissing, "absent must be retryable")
+            }
+            other => panic!("expected refusal, got {other:?}"),
+        }
+
+        let blob = witness_blob(hash, 1);
+        match h.try_sync_import(&block, Some(&blob)) {
+            SyncImportResult::Rejected { kind, .. } => {
+                assert_eq!(
+                    kind,
+                    RejectKind::GenesisUnacceptable,
+                    "an under-witnessed chain must be terminal"
+                )
+            }
+            other => panic!("expected refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synced_genesis_with_one_witness_is_refused() {
+        // One witness is exactly the solo-founding case the Dual-Witness Rule
+        // exists to prevent. The threshold must match the engine's.
+        let mut h = make_healing_manager();
+        let block = noble_test_utils::fixtures::test_genesis_block();
+        let hash = noble_test_utils::fixtures::test_genesis_hash();
+        expect_genesis(&mut h, hash);
+        let required = h.consensus.read().min_unique_voters();
+        assert!(required >= 2, "Dual-Witness threshold must be at least 2");
+
+        let blob = witness_blob(hash, 1);
+        match h.try_sync_import(&block, Some(&blob)) {
+            SyncImportResult::Rejected { ref reason, .. } => {
+                assert!(
+                    reason.contains("only 1 distinct"),
+                    "must name the witness shortfall, got: {reason}"
+                );
+            }
+            other => panic!("single-witness genesis must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synced_genesis_certificate_must_name_this_block() {
+        // A certificate for some other block proves nothing about this one;
+        // without the binding, one valid certificate would launder any genesis.
+        let mut h = make_healing_manager();
+        let block = noble_test_utils::fixtures::test_genesis_block();
+        expect_genesis(&mut h, noble_test_utils::fixtures::test_genesis_hash());
+        let blob = witness_blob(Hash256::from_bytes([0x77; 32]), 2);
+        match h.try_sync_import(&block, Some(&blob)) {
+            SyncImportResult::Rejected { ref reason, .. } => {
+                assert!(
+                    reason.contains("different block"),
+                    "must reject a certificate bound elsewhere, got: {reason}"
+                );
+            }
+            other => panic!("mismatched certificate must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synced_genesis_with_two_witnesses_is_accepted() {
+        // The rule must not reject everything — a properly witnessed genesis
+        // has to be adoptable or no node can ever join.
+        let mut h = make_healing_manager();
+        let block = noble_test_utils::fixtures::test_genesis_block();
+        let hash = noble_test_utils::fixtures::test_genesis_hash();
+        expect_genesis(&mut h, hash);
+        let blob = witness_blob(hash, 2);
+        let result = h.try_sync_import(&block, Some(&blob));
+        assert!(
+            matches!(result, SyncImportResult::Accepted { .. }),
+            "a genesis with two distinct witnesses must be adoptable, got {result:?}"
+        );
     }
 
     #[test]

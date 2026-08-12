@@ -94,6 +94,10 @@ pub enum ValidationError {
     #[error("B2: prev_block_hash mismatch")]
     PrevHashMismatch,
 
+    /// B2g: genesis must descend from nothing, and only genesis may.
+    #[error("B2g: block at height {height} claims prev_block_hash {prev} — genesis (height {genesis}) must have a zero parent, and no other height may")]
+    GenesisOriginInvalid { height: u64, genesis: u64, prev: String },
+
     /// B3: Height is not parent + 1.
     #[error("B3: height {height} != expected {expected}")]
     HeightMismatch { height: u64, expected: u64 },

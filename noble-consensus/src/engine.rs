@@ -471,6 +471,15 @@ impl CycleEngine {
     /// indistinguishable from a chain whose genesis sits at height 0 — that
     /// collision is why genesis was produced at height 1, leaving index 0 an
     /// empty slot the storage layer then assumed held a block.
+    /// Minimum distinct witnesses a genesis block must carry (Dual-Witness).
+    ///
+    /// Exposed so the sync path can enforce the same threshold the engine
+    /// enforces when founding. A genesis accepted from a peer without this
+    /// check is a chain founded by one node as far as the joining node knows.
+    pub fn min_unique_voters(&self) -> usize {
+        self.config.min_unique_voters
+    }
+
     pub fn has_chain(&self) -> bool {
         self.tip_hash != Hash256::ZERO
     }
@@ -3299,6 +3308,163 @@ mod tests {
         });
         let outputs = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
         assert!(!has_commit(&outputs), "single voter must not commit block 1");
+    }
+
+    #[test]
+    fn the_engine_emits_a_verifiable_genesis_certificate() {
+        // I4 core: until now every certificate in these tests was hand-built.
+        // What matters is whether the certificate the ENGINE actually produces
+        // at commit survives the checks a restart and a joining peer apply —
+        // startup halts on an unverifiable genesis, so a bad one here bricks
+        // the founding node on its own chain and makes it unjoinable.
+        let (vp1, vpub1) = make_validator();
+        let (vp2, vpub2) = make_validator();
+        let mut engine = make_engine(None, &[vpub1.clone(), vpub2.clone()], 2);
+        engine.tracked_phase = CyclePhase::Proposal;
+
+        let (block, hash) =
+            make_valid_block(&vp1, &vpub1, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
+        engine.step(CycleEvent::BlockProposed { block, from_peer: b"p1".to_vec() });
+
+        engine.tracked_phase = CyclePhase::Voting;
+        for (sk, pk, peer) in [
+            (&vp1, vpub1.clone(), b"p1".to_vec()),
+            (&vp2, vpub2.clone(), b"p2".to_vec()),
+        ] {
+            let vote = PorVote::sign(0, hash, sk, pk).unwrap();
+            engine.step(CycleEvent::VoteReceived { vote, from_peer: peer });
+        }
+
+        let outputs = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
+        assert!(has_commit(&outputs), "two distinct witnesses must found the chain");
+
+        // Pull out the certificate the engine emitted for genesis.
+        let stored = outputs.iter().find_map(|o| match o {
+            CycleIo::StoreBlockVotes { height, votes }
+                if *height == noble_core::GENESIS_HEIGHT =>
+            {
+                Some(votes.clone())
+            }
+            _ => None,
+        });
+        let votes = stored.expect("genesis commit must emit a witness record");
+        let cert = votes
+            .certificate
+            .as_ref()
+            .expect("the engine must attach a certificate to genesis");
+
+        assert_eq!(cert.candidate_hash, hash, "certificate must name the committed genesis");
+        let witnesses = cert
+            .verify()
+            .expect("an engine-produced genesis certificate must verify");
+        assert!(
+            witnesses >= ConsensusConfig::default().min_unique_voters,
+            "engine certificate must meet the same threshold the engine enforced: got {witnesses}"
+        );
+    }
+
+    #[test]
+    fn competing_genesis_proposals_converge_when_nodes_agree_on_order() {
+        // The other half of I5: a tie must not commit (tested below), but the
+        // chain must still be able to FOUND. Convergence works because
+        // `select_candidate` is deterministic given identical input —
+        // `all_candidates()` is sorted by `order` and FirstValid takes the
+        // first.
+        //
+        // Worth stating plainly: `order` is ARRIVAL order at each node, not a
+        // canonical property of the block. Two nodes that observe the two
+        // proposals in different orders each vote for a different candidate and
+        // tie, which is safe (empty cycle, retry) but not self-correcting by
+        // construction — convergence relies on gossip delivering a consistent
+        // first-seen proposal. That is a liveness property, not a safety one.
+        let (vp1, vpub1) = make_validator();
+        let (vp2, vpub2) = make_validator();
+
+        let (block_a, hash_a) =
+            make_valid_block(&vp1, &vpub1, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
+        let (block_b, hash_b) =
+            make_valid_block(&vp2, &vpub2, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
+        assert_ne!(hash_a, hash_b);
+
+        // Both nodes observe A first, then B — the ordinary case where one
+        // proposal reaches the mesh ahead of the other.
+        let mut engine = make_engine(None, &[vpub1.clone(), vpub2.clone()], 2);
+        engine.tracked_phase = CyclePhase::Proposal;
+        for (b, p) in [
+            (block_a.clone(), b"p1".to_vec()),
+            (block_b.clone(), b"p2".to_vec()),
+        ] {
+            engine.step(CycleEvent::BlockProposed { block: b, from_peer: p });
+        }
+
+        // Each node applies the same deterministic selection, so both vote for
+        // the same candidate.
+        let chosen = crate::strategy::select_candidate(
+            &ConsensusConfig::default().voting_strategy,
+            &engine.candidate_tracker,
+            &crate::registry::ValidatorRegistry::empty().create_snapshot(),
+            0,
+            None,
+            None,
+        )
+        .expect("a candidate must be selectable");
+        assert_eq!(chosen, hash_a, "identical ordering must yield an identical choice");
+
+        engine.tracked_phase = CyclePhase::Voting;
+        for (sk, pk, peer) in [
+            (&vp1, vpub1.clone(), b"p1".to_vec()),
+            (&vp2, vpub2.clone(), b"p2".to_vec()),
+        ] {
+            let vote = PorVote::sign(0, chosen, sk, pk).unwrap();
+            engine.step(CycleEvent::VoteReceived { vote, from_peer: peer });
+        }
+
+        let outputs = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
+        assert!(
+            has_commit(&outputs),
+            "two nodes agreeing on the same candidate must found the chain"
+        );
+    }
+
+    #[test]
+    fn competing_genesis_proposals_tie_and_do_not_commit() {
+        // I5: if two nodes each propose their own genesis and each votes for
+        // its own, the tally ties. The design deliberately has NO tiebreaker
+        // ("a deterministic fallback makes voting pointless"), so the cycle
+        // must end empty rather than commit an arbitrary foundation.
+        //
+        // The failure this guards against is the opposite of a livelock: a
+        // chain founded on a coin flip, with each node believing a different
+        // genesis.
+        let (vp1, vpub1) = make_validator();
+        let (vp2, vpub2) = make_validator();
+        let mut engine = make_engine(None, &[vpub1.clone(), vpub2.clone()], 2);
+        engine.tracked_phase = CyclePhase::Proposal;
+
+        let (block_a, hash_a) =
+            make_valid_block(&vp1, &vpub1, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
+        let (block_b, hash_b) =
+            make_valid_block(&vp2, &vpub2, noble_core::GENESIS_HEIGHT, Hash256::ZERO);
+        assert_ne!(hash_a, hash_b, "the two proposals must differ");
+
+        for (b, p) in [(block_a, b"p1".to_vec()), (block_b, b"p2".to_vec())] {
+            engine.step(CycleEvent::BlockProposed { block: b, from_peer: p });
+        }
+
+        engine.tracked_phase = CyclePhase::Voting;
+        for (h, sk, pk, peer) in [
+            (hash_a, &vp1, vpub1.clone(), b"p1".to_vec()),
+            (hash_b, &vp2, vpub2.clone(), b"p2".to_vec()),
+        ] {
+            let vote = PorVote::sign(0, h, sk, pk).unwrap();
+            engine.step(CycleEvent::VoteReceived { vote, from_peer: peer });
+        }
+
+        let outputs = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
+        assert!(
+            !has_commit(&outputs),
+            "a tied genesis vote must not commit — no node may found the chain alone"
+        );
     }
 
     #[test]

@@ -588,6 +588,29 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
     }
     tracing::trace!(size = serialized.len(), "B1: block size check passed");
 
+    // B2g: the origin rule, checked with or without parent context.
+    //
+    // "Genesis is the foundation and there is no block prior to it" is the
+    // *definition*, and until now nothing enforced it: B2/B3/B5 only run when a
+    // parent header is present, and genesis by construction has none. So a
+    // block claiming to be genesis with an arbitrary prev_block_hash passed
+    // structural validation, and a block at any other height could claim to
+    // descend from nothing.
+    //
+    // Both directions are checked: genesis must have a zero parent, and a zero
+    // parent may only appear at genesis.
+    {
+        let is_genesis_height = header.height == crate::constants::GENESIS_HEIGHT;
+        let claims_no_parent = header.prev_block_hash == Hash256::ZERO;
+        if is_genesis_height != claims_no_parent {
+            return Err(ValidationError::GenesisOriginInvalid {
+                height: header.height,
+                genesis: crate::constants::GENESIS_HEIGHT,
+                prev: header.prev_block_hash.to_string(),
+            });
+        }
+    }
+
     // B2: prev_block_hash
     if let Some(parent) = ctx.parent {
         let parent_hash = parent.compute_block_hash().map_err(|e| {
@@ -1059,6 +1082,62 @@ mod tests {
             },
             val_priv,
         )
+    }
+
+    // --- B2g: the origin rule ---
+
+    /// Build a signed block at `height` with `prev`, and validate it with no
+    /// parent context — the situation genesis is always in.
+    fn origin_check(height: u64, prev: Hash256) -> Result<(), ValidationError> {
+        let (sk, pk) = secp256k1::generate_keypair();
+        let tx = make_signed_tx(&sk, &pk);
+        let (mut block, val_priv) = make_valid_block(vec![tx]);
+        block.header.height = height;
+        block.header.prev_block_hash = prev;
+        let msg = block.header.compute_signing_message().unwrap();
+        block.header.validator_sig = val_priv.sign(&msg).unwrap();
+
+        let ctx = BlockValidationContext {
+            chain_id: test_chain_id(),
+            time_context: TimeContext::RealTime { wall_clock: 1_700_000_000 },
+            parent: None,
+            validator_list: &[block.header.validator_id.clone()],
+        };
+        validate_block(&block, &ctx)
+    }
+
+    #[test]
+    fn genesis_must_descend_from_nothing() {
+        // A forged "genesis" with an arbitrary parent used to pass structural
+        // validation entirely: B2/B3/B5 only run when a parent header is
+        // present, and genesis never has one. "There is no block prior to it"
+        // is the definition of genesis and nothing enforced it.
+        let r = origin_check(crate::constants::GENESIS_HEIGHT, Hash256::from_bytes([0x5A; 32]));
+        assert!(
+            matches!(r, Err(ValidationError::GenesisOriginInvalid { .. })),
+            "genesis with a non-zero parent must be rejected, got {r:?}"
+        );
+    }
+
+    #[test]
+    fn only_genesis_may_descend_from_nothing() {
+        // The converse: a later block claiming a zero parent is claiming to be
+        // an origin at the wrong index.
+        let r = origin_check(crate::constants::GENESIS_HEIGHT + 5, Hash256::ZERO);
+        assert!(
+            matches!(r, Err(ValidationError::GenesisOriginInvalid { .. })),
+            "a non-genesis block must not claim a zero parent, got {r:?}"
+        );
+    }
+
+    #[test]
+    fn a_well_formed_genesis_passes_the_origin_rule() {
+        // The rule must not reject real genesis blocks.
+        let r = origin_check(crate::constants::GENESIS_HEIGHT, Hash256::ZERO);
+        assert!(
+            !matches!(r, Err(ValidationError::GenesisOriginInvalid { .. })),
+            "a zero-parent genesis must pass the origin rule, got {r:?}"
+        );
     }
 
     // --- B2: prev_block_hash ---

@@ -438,12 +438,15 @@ mod tests {
         let tx = make_test_tx(b"validated_doc", MIN_TX_FEE);
 
         let now = now_secs();
-        // Use height=1 (not 0) — subsidy_at_height(0)=0 produces a zero-value
-        // coinbase output which fails U8 validation ("outputs must be > 0").
+        // Genesis: zero parent at GENESIS_HEIGHT. This previously used height 1
+        // with a zero parent — a shape no real chain can have, and now rejected
+        // by the origin rule. It was chosen because genesis paid no subsidy and
+        // produced a zero-value coinbase that failed U8; genesis is now paid
+        // like any other block, so the real shape validates.
         let block = propose_block(
             &[tx],
             Hash256::ZERO,
-            1,
+            noble_core::constants::GENESIS_HEIGHT,
             now,
             test_chain_id(),
             &val_priv,

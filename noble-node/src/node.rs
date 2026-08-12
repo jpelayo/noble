@@ -289,6 +289,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // Verified at every startup because a chain that has lost or altered
         // its foundation cannot be repaired by syncing — every other block
         // descends from it.
+        // Same threshold the engine enforces when founding.
+        let required_witnesses = build_consensus_config(config).min_unique_voters;
         let genesis_ok = {
             let st = storage.read();
             match st.genesis() {
@@ -320,6 +322,61 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 g.block_hash,
                             );
                             ok = false;
+                        }
+                        // Genesis must still be able to PROVE its witnesses,
+                        // not merely have had them once. A foundation that
+                        // cannot show a Dual-Witness certificate is
+                        // indistinguishable from one founded by a single node,
+                        // and everything on the chain descends from it.
+                        match st.get_block_votes(g.height) {
+                            Ok(Some(raw)) => {
+                                match <noble_consensus::BlockVotes as noble_codec::NobleCbor>::from_cbor(&raw) {
+                                    Ok(bv) => match bv.certificate {
+                                        Some(cert) if cert.candidate_hash == g.block_hash => {
+                                            match cert.verify() {
+                                                Ok(w) if w >= required_witnesses => {
+                                                    tracing::info!(
+                                                        task = "integrity",
+                                                        "genesis witnessed by {w} distinct validator(s)",
+                                                    );
+                                                }
+                                                Ok(w) => {
+                                                    tracing::error!(
+                                                        task = "integrity",
+                                                        "genesis carries only {w} distinct witness(es); \
+                                                         {required_witnesses} required",
+                                                    );
+                                                    ok = false;
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!(task = "integrity", "genesis witness certificate does not verify: {e}");
+                                                    ok = false;
+                                                }
+                                            }
+                                        }
+                                        Some(_) => {
+                                            tracing::error!(task = "integrity", "genesis witness certificate names a different block");
+                                            ok = false;
+                                        }
+                                        None => {
+                                            tracing::error!(task = "integrity", "genesis has no witness certificate");
+                                            ok = false;
+                                        }
+                                    },
+                                    Err(e) => {
+                                        tracing::error!(task = "integrity", "genesis witness record undecodable: {e}");
+                                        ok = false;
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                tracing::error!(task = "integrity", "genesis has no stored witness record");
+                                ok = false;
+                            }
+                            Err(e) => {
+                                tracing::error!(task = "integrity", "genesis witness record unreadable: {e}");
+                                ok = false;
+                            }
                         }
                         ok
                     }
@@ -4029,14 +4086,32 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         tracing::debug!(task = "broadcast", "block_received event dropped (no subscribers): {e}");
                     }
                 }
-                let tip_height = self.consensus.read().chain_tip().0;
+                let (tip_height, have_chain) = {
+                    let engine = self.consensus.read();
+                    (engine.chain_tip().0, engine.has_chain())
+                };
 
-                if block.header.height <= tip_height {
+                if have_chain && block.header.height <= tip_height {
                     // Already have this block — ignore.
-                } else if block.header.height == 1 && tip_height == 0 && !self.healing.is_syncing() {
-                    // Block 1 at genesis: MUST go through consensus engine so the
-                    // Dual-Witness Rule (R1-only) is enforced at cycle boundary.
-                    // try_sync_import bypasses the witness check entirely.
+                    //
+                    // `have_chain` matters: with no chain the tip height is 0,
+                    // so a GENESIS block (height 0) satisfied `height <=
+                    // tip_height` and was silently discarded — a joining node
+                    // could never accept the one block everything descends
+                    // from, from gossip or from anywhere.
+                } else if block.header.height == noble_core::GENESIS_HEIGHT
+                    && !have_chain
+                    && !self.healing.is_syncing()
+                {
+                    // Genesis MUST go through the consensus engine so the
+                    // Dual-Witness Rule (R1-only) is enforced at the cycle
+                    // boundary. try_sync_import bypasses the witness check
+                    // entirely, so anything that reaches it is committed
+                    // without witnesses.
+                    //
+                    // This guard keyed on `height == 1` — the old genesis
+                    // index. After renumbering it matched nothing, leaving the
+                    // founding block routed to the bypass.
                     let cycle_event = bridge::network_event_to_cycle_event(
                         &NetworkEvent::BlockReceived {
                             peer_id: peer_id.clone(),
@@ -6059,6 +6134,82 @@ mod tests {
     }
 
     #[test]
+    fn a_genesis_without_witnesses_halts_the_node_at_startup() {
+        // Startup re-verifies that genesis can still PROVE its Dual-Witness
+        // certificate — "cannot survive afterwards", not merely "was witnessed
+        // once". Everything on the chain descends from genesis, so a
+        // foundation that cannot show its witnesses is indistinguishable from
+        // one founded by a single node.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.wallet.keystore_path = dir.path().join("keystore.noble");
+        config.storage.data_dir = dir.path().to_path_buf();
+
+        // A committed genesis with NO stored witness record.
+        let storage = MemoryStorage::new();
+        let genesis = noble_test_utils::fixtures::test_genesis_block();
+        let hash = noble_test_utils::fixtures::test_genesis_hash();
+        storage.commit_block(&genesis, &hash, &[]).expect("genesis commits");
+
+        let node = Node::init_with_storage(&config, storage, None, Vec::new())
+            .expect("node still starts — it halts read-only rather than refusing to boot");
+        assert!(
+            node.integrity_failed.load(std::sync::atomic::Ordering::Relaxed),
+            "an unwitnessed genesis must halt the node"
+        );
+    }
+
+    #[test]
+    fn a_properly_witnessed_genesis_starts_normally() {
+        // The check must not halt a healthy chain.
+        use noble_codec::NobleCbor;
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.wallet.keystore_path = dir.path().join("keystore.noble");
+        config.storage.data_dir = dir.path().to_path_buf();
+
+        let storage = MemoryStorage::new();
+        let genesis = noble_test_utils::fixtures::test_genesis_block();
+        let hash = noble_test_utils::fixtures::test_genesis_hash();
+        storage.commit_block(&genesis, &hash, &[]).expect("genesis commits");
+
+        let required = build_consensus_config(&config).min_unique_voters;
+        let mut votes = Vec::new();
+        for _ in 0..required {
+            let (sk, pk) = noble_crypto::secp256k1::generate_keypair();
+            let priv_key = noble_crypto::NoblePrivateKey::Secp256k1(sk);
+            let pub_key = noble_crypto::NoblePublicKey::Secp256k1(pk);
+            votes.push(
+                noble_consensus::PorVote::sign(0, hash, &priv_key, pub_key).expect("vote signs"),
+            );
+        }
+        let bv = noble_consensus::BlockVotes {
+            cycle_number: 0,
+            voter_count: required,
+            strength: "Strong".to_string(),
+            r1_voters: vec![],
+            r2_voters: vec![],
+            unique_witness_count: required,
+            dual_witness_required: true,
+            dual_witness_met: true,
+            certificate: Some(noble_consensus::history::WitnessCertificate {
+                cycle: 0,
+                candidate_hash: hash,
+                votes,
+            }),
+        };
+        storage
+            .store_block_votes(noble_core::GENESIS_HEIGHT, &bv.to_cbor().unwrap())
+            .expect("witness record persists");
+
+        let node = Node::init_with_storage(&config, storage, None, Vec::new()).expect("starts");
+        assert!(
+            !node.integrity_failed.load(std::sync::atomic::Ordering::Relaxed),
+            "a properly witnessed genesis must start normally"
+        );
+    }
+
+    #[test]
     fn init_memory_node_starts_stateless() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
@@ -6616,20 +6767,26 @@ mod tests {
     }
 
     #[test]
-    fn block_1_routing_goes_to_consensus_engine() {
-        // Verify the routing condition: block 1 at tip_height=0 (not syncing)
-        // must match the consensus engine path, not the sync import path.
-        let tip_height: u64 = 0;
-        let block_height: u64 = 1;
+    fn genesis_routing_goes_to_consensus_engine_not_the_sync_bypass() {
+        // `try_sync_import` does not enforce the Dual-Witness Rule — the code
+        // says so at the routing site. So genesis must never reach it: a
+        // genesis committed through the bypass is a chain founded with no
+        // witnesses.
+        //
+        // Both halves of this broke in the renumbering: the "already have it"
+        // check dropped genesis (`0 <= 0`), and this guard keyed on height 1.
+        let block_height: u64 = noble_core::GENESIS_HEIGHT;
+        let have_chain = false;
         let is_syncing = false;
 
-        // The catch-up range condition that previously routed block 1 to sync import:
-        let old_sync_condition = block_height > tip_height && block_height <= tip_height + 256;
-        assert!(old_sync_condition, "block 1 WOULD have matched the old sync import condition");
+        // The "already have this block" check must NOT swallow genesis when we
+        // have no chain — that silently discarded the founding block.
+        let tip_height: u64 = 0;
+        let already_have = have_chain && block_height <= tip_height;
+        assert!(!already_have, "genesis must not be discarded as already-present");
 
-        // The new guard that intercepts block 1 before the sync import path:
-        let genesis_guard = block_height == 1 && tip_height == 0 && !is_syncing;
-        assert!(genesis_guard, "block 1 at genesis must hit the consensus engine guard");
+        let genesis_guard = block_height == noble_core::GENESIS_HEIGHT && !have_chain && !is_syncing;
+        assert!(genesis_guard, "genesis must be routed to the consensus engine, not the sync bypass");
     }
 
     #[test]
@@ -6638,10 +6795,11 @@ mod tests {
         // The genesis guard only applies to block 1 at tip_height=0.
         let tip_height: u64 = 1;
         let block_height: u64 = 2;
+        let have_chain = true;
         let is_syncing = false;
 
-        let genesis_guard = block_height == 1 && tip_height == 0 && !is_syncing;
-        assert!(!genesis_guard, "block 2 must NOT hit the genesis guard");
+        let genesis_guard = block_height == noble_core::GENESIS_HEIGHT && !have_chain && !is_syncing;
+        assert!(!genesis_guard, "a post-genesis block must NOT hit the genesis guard");
 
         let sync_condition = block_height > tip_height && block_height <= tip_height + 256;
         assert!(sync_condition, "block 2 should go through sync import");
@@ -6654,11 +6812,13 @@ mod tests {
         // peer with a longer chain, dual-witness was already enforced on
         // the source chain.
         let tip_height: u64 = 0;
-        let block_height: u64 = 1;
+        let block_height: u64 = noble_core::GENESIS_HEIGHT;
+        let have_chain = false;
         let is_syncing = true;
+        let _ = tip_height;
 
-        let genesis_guard = block_height == 1 && tip_height == 0 && !is_syncing;
-        assert!(!genesis_guard, "block 1 during active sync must NOT hit the genesis guard");
+        let genesis_guard = block_height == noble_core::GENESIS_HEIGHT && !have_chain && !is_syncing;
+        assert!(!genesis_guard, "genesis during active sync must NOT hit the genesis guard");
     }
 
     #[test]

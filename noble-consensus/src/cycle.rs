@@ -201,3 +201,29 @@ mod tests {
         assert_eq!(m.seconds_until_cycle_boundary(G + 960), 960);
     }
 }
+
+#[cfg(test)]
+mod bootstrap_epoch_tests {
+    use super::*;
+
+    #[test]
+    fn founding_epoch_pins_the_cycle_to_zero() {
+        // Genesis witness certificates declare `cycle: 0`, and `verify()`
+        // rejects any vote whose cycle differs. That only holds because the
+        // founding epoch is represented as `genesis_timestamp = u64::MAX`, so
+        // `elapsed = now.saturating_sub(u64::MAX)` saturates to 0.
+        //
+        // Nothing else documents that dependency. If the founding epoch were
+        // represented differently, every genesis certificate would become
+        // unverifiable — and the failure would surface at startup and at join,
+        // far from the change that caused it.
+        let mgr = CycleManager::new(noble_core::CYCLE_DURATION_SECS, Some(u64::MAX));
+        for now in [0u64, 1, 1_700_000_000, u64::MAX / 2] {
+            assert_eq!(
+                mgr.current_cycle(now),
+                0,
+                "the founding epoch must compute cycle 0 at any wall clock (now={now})"
+            );
+        }
+    }
+}
