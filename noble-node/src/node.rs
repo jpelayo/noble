@@ -273,7 +273,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let mempool = Arc::new(TrackedMutex::new(LockOrder::Mempool, Mempool::new(mempool_config)));
 
         // Determine chain tip for the consensus engine.
-        let mut tip = storage
+        let tip = storage
             .read()
             .get_chain_tip()?
             .unwrap_or(noble_storage::ChainTip {
@@ -2987,20 +2987,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // acquiring storage (lock order: Storage(2) < Consensus(4)).
                     let cycle_history_data = {
                         let mut engine = self.consensus.write();
-                        engine.take_cycle_history().map(|history| {
-                            let (tip_height, _) = engine.chain_tip();
-                            (history, tip_height)
-                        })
+                        engine
+                            .take_cycle_history()
+                            .map(|history| (history, engine.has_chain()))
                     };
-                    if let Some((history, tip_height)) = cycle_history_data {
-                        // Don't persist during bootstrap (tip=0): cycle numbers
-                        // are based on a temporary epoch and become meaningless
-                        // once the real chain's block 1 resets the epoch.
-                        if !self.consensus.read().has_chain() {
+                    if let Some((history, have_chain)) = cycle_history_data {
+                        // Don't persist while still founding: cycle numbers come
+                        // from a temporary epoch and become meaningless once
+                        // genesis commits and resets it.
+                        if !have_chain {
                             tracing::debug!(
                                 task = "consensus",
                                 cycle = history.cycle_number,
-                                "skipping cycle history persist during bootstrap (tip=0)"
+                                "skipping cycle history persist while founding (no chain yet)"
                             );
                         } else if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(&history) {
                             let storage = self.storage.read();
