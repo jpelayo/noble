@@ -792,7 +792,10 @@ export function init(root, ctx) {
       // Events with enriched follow-up messages: push the enriched version only
       // (skip the raw event to avoid duplicate log lines).
       if (data.event === 'block_proposed' && data.hash) {
-        pushActivity({ event: 'block_proposed', message: `This node proposed block #${data.height || '?'} {${truncateHash(data.hash)}}` });
+        // `??` not `||`: genesis is height 0, and 0 is falsy in JS — `||`
+        // rendered the founding block as "#?", the one block whose number
+        // matters most while founding.
+        pushActivity({ event: 'block_proposed', message: `This node proposed block #${data.height ?? '?'} {${truncateHash(data.hash)}}` });
       } else if (data.event === 'vote_broadcast') {
         const target = data.candidate_name || hashLabel(data.block_hash || '');
         pushActivity({ event: 'vote_broadcast', message: `This node voted for ${target} (R${data.round || 1})` });

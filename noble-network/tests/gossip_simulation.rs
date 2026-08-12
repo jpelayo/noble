@@ -314,6 +314,80 @@ async fn gossip_node_announce_chain_tip_emits_peer_update() {
 }
 
 /// Block published on A arrives as BlockAnnounced on B with correct hash and height.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_genesis_candidate_announced_by_a_peer_can_be_fetched() {
+    // The founding path, end to end over real libp2p: A proposes genesis, B
+    // hears the announce and must be able to OBTAIN the block. Without the
+    // block, B has only its own candidate, votes for it, and the 1-1 tie never
+    // breaks — the chain cannot be founded at all.
+    //
+    // Every other founding test injects candidates straight into the engine,
+    // so none of them touch announce -> GetBlocks -> deliver. This one does,
+    // and it is the step that broke: `GetBlocks` was made to refuse anything at
+    // GENESIS_HEIGHT because that response carries no witness certificate —
+    // conflating *adopting* a foundation with *receiving a candidate to vote
+    // on*, which cannot have a certificate because it has not been voted on.
+    let node_a = start_gossip_node().await;
+    let mut node_b = start_gossip_node().await;
+
+    dial_and_connect(&node_a, &node_b).await;
+    wait_for_mesh().await;
+
+    let (sk, pk) = make_keypair();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    struct NoopLookup;
+    impl noble_consensus::proposal::UtxoValueLookup for NoopLookup {
+        fn utxo_value(&self, _: &noble_core::OutPoint) -> Option<u64> { None }
+    }
+    // Genesis shape: GENESIS_HEIGHT, descending from nothing.
+    let block = noble_consensus::propose_block(
+        &[],
+        Hash256::ZERO,
+        noble_core::constants::GENESIS_HEIGHT,
+        now,
+        test_chain_id(),
+        &sk,
+        &pk,
+        8 * 1024 * 1024,
+        &NoopLookup,
+        None,
+    )
+    .expect("genesis proposal should succeed");
+    let expected_hash = block.header.compute_block_hash().unwrap();
+
+    node_a
+        .command_sender()
+        .send(NetworkCommand::PublishBlock(block))
+        .await
+        .unwrap();
+
+    // The announce is not enough — B must end up holding the block itself.
+    let event = drain_until(
+        &mut node_b,
+        |e| matches!(e, NetworkEvent::BlockReceived { .. }),
+        15,
+    )
+    .await;
+
+    if let NetworkEvent::BlockReceived { block, .. } = event {
+        assert_eq!(
+            block.header.compute_block_hash().unwrap(),
+            expected_hash,
+            "B must receive the genesis candidate A announced"
+        );
+        assert_eq!(block.header.height, noble_core::constants::GENESIS_HEIGHT);
+    } else {
+        panic!("expected BlockReceived");
+    }
+
+    shutdown(&node_a).await;
+    shutdown(&node_b).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
 #[tokio::test]
 async fn gossip_block_announce_end_to_end() {
     let node_a = start_gossip_node().await;

@@ -2918,19 +2918,21 @@ fn handle_sync_request(
                     .get_block(h)
                     .or_else(|| pending_proposals.get(h).map(|(b, _)| b.clone()));
                 if let Some(b) = block {
-                    // Never serve GENESIS here. `SyncResponse::Blocks` has no
-                    // slot for vote data, and a genesis without its
-                    // Dual-Witness certificate is unacceptable to any correct
-                    // peer — so answering by this path hands out a block the
-                    // requester must reject. Genesis is served by
-                    // `GetBlockByHeight`, which carries `get_block_votes`.
-                    if b.header.height == noble_core::constants::GENESIS_HEIGHT {
-                        tracing::debug!(
-                            task = "sync_response",
-                            "omitting genesis from a GetBlocks batch — it must be fetched by                              height so its witness certificate travels with it"
-                        );
-                        continue;
-                    }
+                    // Genesis IS served here, deliberately.
+                    //
+                    // An earlier version omitted it, reasoning that this path
+                    // cannot carry a witness certificate. That conflated two
+                    // different uses of a block: *adopting* a foundation, which
+                    // needs the certificate, and *receiving a competing
+                    // candidate to vote on*, which cannot possibly have one —
+                    // the block has not been voted on yet. Withholding it meant
+                    // `handle_block_announce` (which fetches via GetBlocks)
+                    // could never obtain a peer's genesis candidate, so each
+                    // node saw only its own, voted for it, and the tie never
+                    // broke: the chain could not be founded at all.
+                    //
+                    // The certificate requirement belongs at the import
+                    // decision (`try_sync_import`), not at serving.
                     // Cheap upper-bound estimate: 512 B header overhead + 2 KB per tx.
                     // Real serialized size is typically much smaller; this just bounds
                     // memory if the chain ever has near-MAX_BLOCK_SIZE blocks.
@@ -3881,11 +3883,12 @@ mod tests {
     }
 
     #[test]
-    fn get_blocks_never_serves_genesis() {
-        // `SyncResponse::Blocks` has no slot for vote data, and a genesis
-        // without its Dual-Witness certificate is unacceptable to any correct
-        // peer. Serving it here hands out a block the requester is obliged to
-        // reject; genesis goes via GetBlockByHeight, which carries votes.
+    fn get_blocks_serves_genesis_candidates() {
+        // A genesis CANDIDATE has no witness certificate — it has not been
+        // voted on yet. Refusing to serve it here starves consensus of the
+        // competing candidate it must vote on, and the chain never founds.
+        // The certificate is required when ADOPTING a foundation, not when
+        // handing over a block to vote on.
         let genesis = noble_test_utils::fixtures::test_genesis_block();
         assert_eq!(genesis.header.height, noble_core::constants::GENESIS_HEIGHT);
         let bp: Arc<dyn BlockProvider> = Arc::new(OneBlockProvider { block: genesis });
@@ -3899,41 +3902,11 @@ mod tests {
             &pp,
         );
         match response {
-            SyncResponse::Blocks(blocks) => assert!(
-                blocks.is_empty(),
-                "genesis must not be served over a path that cannot carry its certificate"
+            SyncResponse::Blocks(blocks) => assert_eq!(
+                blocks.len(),
+                1,
+                "a genesis candidate must be servable or founding deadlocks"
             ),
-            other => panic!("expected Blocks, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn get_blocks_still_serves_ordinary_blocks() {
-        // The omission must be genesis-specific, not a blanket break of batch
-        // sync.
-        let validator = noble_test_utils::fixtures::TestKeypair::generate();
-        let (block, _h, _ids) = noble_test_utils::fixtures::make_block_with_coinbase(
-            vec![],
-            noble_core::constants::GENESIS_HEIGHT + 1,
-            noble_crypto::Hash256::from_bytes([0x22; 32]),
-            noble_core::GENESIS_TIMESTAMP + 960,
-            &validator,
-            &[],
-        );
-        let bp: Arc<dyn BlockProvider> = Arc::new(OneBlockProvider { block });
-        let config = NetworkConfig::local_test();
-        let pp = HashMap::new();
-
-        let response = handle_sync_request(
-            &SyncRequest::GetBlocks { hashes: vec![[0x11; 32]] },
-            &bp,
-            &config,
-            &pp,
-        );
-        match response {
-            SyncResponse::Blocks(blocks) => {
-                assert_eq!(blocks.len(), 1, "non-genesis blocks must still be served")
-            }
             other => panic!("expected Blocks, got {other:?}"),
         }
     }
