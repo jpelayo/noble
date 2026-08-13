@@ -37,7 +37,9 @@ pub use evidence::{
 pub use genesis::{build_genesis, derive_chain_id, GENESIS_TIMESTAMP};
 pub use merkle::{compute_merkle_root, MerkleProof};
 pub use metadata::{validate_metadata, validate_version_metadata, MetadataEntry};
-pub use node_announce::{compute_pki_binding_message_for_key, NodeAnnounce, NodeRole, OrgType};
+pub use node_announce::{
+    compute_pki_binding_message_for_key, AnnounceInvalid, NodeAnnounce, NodeRole, OrgType,
+};
 pub use peer_record::PeerRecord;
 pub use pst::{PartiallySignedTransaction, PstError, SignerEntry, SignerRole, PST_VERSION};
 pub use transaction::Transaction;

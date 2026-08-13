@@ -36,6 +36,7 @@ pub enum BanCategoryCode {
     EvidenceReceived = 0x0A,
     Misrepresentation = 0x0B,
     ManualBan = 0x0C,
+    ClockSkew = 0x0D,
 }
 
 /// Evidence that a validator proposed two different blocks in the same cycle.

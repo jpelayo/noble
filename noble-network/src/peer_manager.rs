@@ -33,6 +33,7 @@ pub enum Direction {
 /// - EvidenceReceived: 100 (instant ban — network evidence of double proposal)
 /// - Misrepresentation: 50 (false identity claims)
 /// - ManualBan: 100 (operator-initiated via RPC)
+/// - ClockSkew: 1 (operational fault, not misbehaviour — cannot ban a stable link)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum BanCategory {
@@ -60,6 +61,9 @@ pub enum BanCategory {
     Misrepresentation = 0x0B,
     /// Manual ban issued by the operator via RPC.
     ManualBan = 0x0C,
+    /// Peer's clock is further ahead than the announce tolerance allows.
+    /// An operational fault, not an attack — priced accordingly (see `penalty`).
+    ClockSkew = 0x0D,
 }
 
 impl BanCategory {
@@ -78,6 +82,7 @@ impl BanCategory {
             0x0A => Some(Self::EvidenceReceived),
             0x0B => Some(Self::Misrepresentation),
             0x0C => Some(Self::ManualBan),
+            0x0D => Some(Self::ClockSkew),
             _ => None,
         }
     }
@@ -112,6 +117,13 @@ impl BanCategory {
             Self::EvidenceReceived => 100,
             Self::Misrepresentation => 50,
             Self::ManualBan => 100,
+            // Deliberately near-zero. A drifted clock is an operator problem,
+            // not misbehaviour, and the announce it carries is unauthenticated
+            // metadata we discard anyway. At 1 point against the 1 pt/min decay,
+            // a stable link can never accumulate to the threshold; only a
+            // genuinely broken clock combined with sustained reconnect churn
+            // ever degrades the peer.
+            Self::ClockSkew => 1,
         }
     }
 
@@ -142,6 +154,7 @@ impl BanCategory {
             Self::EvidenceReceived => "evidence_received",
             Self::Misrepresentation => "misrepresentation",
             Self::ManualBan => "manual_ban",
+            Self::ClockSkew => "clock_skew",
         }
     }
 }
@@ -1123,6 +1136,53 @@ mod tests {
         assert_eq!(BanCategory::EvidenceReceived.penalty(), 100);
         assert_eq!(BanCategory::Misrepresentation.penalty(), 50);
         assert_eq!(BanCategory::ManualBan.penalty(), 100);
+        assert_eq!(BanCategory::ClockSkew.penalty(), 1);
+    }
+
+    /// The two `BanCategory` enums are declared independently — one here, one in
+    /// `noble_core::BanCategoryCode` — over the same wire code space. Nothing in
+    /// the type system keeps them aligned, and a silent divergence would send
+    /// `From<BanCategoryCode>` down its `unwrap_or(ProtocolViolation)` fallback,
+    /// re-pricing a 1-point clock fault as a 30-point violation.
+    #[test]
+    fn ban_category_codes_match_noble_core() {
+        use noble_core::BanCategoryCode as Code;
+        for (local, core) in [
+            (BanCategory::InvalidBlock, Code::InvalidBlock),
+            (BanCategory::InvalidTransaction, Code::InvalidTransaction),
+            (BanCategory::ProtocolViolation, Code::ProtocolViolation),
+            (BanCategory::DuplicateProposal, Code::DuplicateProposal),
+            (BanCategory::ExcessiveConnections, Code::ExcessiveConnections),
+            (BanCategory::Unresponsive, Code::Unresponsive),
+            (BanCategory::InvalidVote, Code::InvalidVote),
+            (BanCategory::InvalidAnnounce, Code::InvalidAnnounce),
+            (BanCategory::TxFlood, Code::TxFlood),
+            (BanCategory::EvidenceReceived, Code::EvidenceReceived),
+            (BanCategory::Misrepresentation, Code::Misrepresentation),
+            (BanCategory::ManualBan, Code::ManualBan),
+            (BanCategory::ClockSkew, Code::ClockSkew),
+        ] {
+            assert_eq!(local as u8, core as u8, "code drift for {local:?}");
+            // Round-trips through the wire byte and the From impl alike.
+            assert_eq!(BanCategory::from_u8(core as u8), Some(local));
+            assert_eq!(BanCategory::from(core), local);
+        }
+    }
+
+    #[test]
+    fn clock_skew_cannot_ban_a_stable_peer() {
+        let mut pm = PeerManager::new(&test_config());
+        let p = random_peer();
+        let _ = pm.on_connected(p, Direction::Outbound);
+        // Even a long run of rejections stays far below the threshold, because
+        // 1 point per event is outpaced by the 1 pt/min decay on any real link.
+        for _ in 0..50 {
+            let outcome =
+                pm.record_misbehavior(&p, BanReason::new(BanCategory::ClockSkew, "skew"));
+            assert!(!outcome.is_banned(), "clock skew must not ban");
+        }
+        assert!(!pm.is_banned(&p));
+        assert!(pm.get_peer(&p).unwrap().ban_score < 100);
     }
 
     #[test]

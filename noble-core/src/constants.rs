@@ -186,6 +186,16 @@ pub const MAX_SOFTWARE_VERSION_LEN: usize = 32;
 /// Maximum age of a NodeAnnounce before it is considered stale (seconds).
 pub const NODE_ANNOUNCE_MAX_AGE_SECS: u64 = 3_600;
 
+/// Maximum allowed NodeAnnounce timestamp skew into the future (seconds).
+///
+/// Honest peers' clocks drift; a sub-second offset must never read as a fault.
+/// This check previously had no tolerance term at all, which made it the only
+/// forward-time check in the protocol that treated any positive skew as
+/// misbehaviour — a peer 0.112 s ahead was banned for 24 h.
+///
+/// Cf. `MAX_BLOCK_FUTURE_SKEW` (300) and `VOTE_ACCEPT_TOLERANCE` (30).
+pub const NODE_ANNOUNCE_FUTURE_TOLERANCE_SECS: u64 = 10;
+
 /// Validator liveness: considered alive if last seen within 3 cycles (48 min at 16-min cycles).
 pub const VALIDATOR_ALIVE_THRESHOLD_SECS: u64 = 5_400;
 

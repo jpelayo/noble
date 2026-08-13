@@ -12,9 +12,53 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{
     MAX_ATTESTATION_DATA_SIZE, MAX_NODE_NAME_LEN, MAX_ORG_NAME_LEN, MAX_SOFTWARE_VERSION_LEN,
-    NODE_ANNOUNCE_MAX_AGE_SECS, NODE_ANNOUNCE_VERSION, PKI_BIND_DOMAIN_TAG,
+    NODE_ANNOUNCE_FUTURE_TOLERANCE_SECS, NODE_ANNOUNCE_MAX_AGE_SECS, NODE_ANNOUNCE_VERSION,
+    PKI_BIND_DOMAIN_TAG,
 };
 use crate::encrypted_locator::ExternalAttestation;
+
+/// Why a [`NodeAnnounce`] failed validation.
+///
+/// Typed so the network layer can distinguish an *operational* fault — a peer
+/// whose clock has drifted — from a structurally invalid or forged record. The
+/// two carry very different ban penalties (`BanCategory::ClockSkew` scores 1,
+/// `InvalidAnnounce` scores 15); conflating them banned honest peers for 24 h
+/// over a sub-second offset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnnounceInvalid {
+    /// Timestamp sits further ahead of our clock than
+    /// [`NODE_ANNOUNCE_FUTURE_TOLERANCE_SECS`] allows.
+    ClockSkew {
+        /// How far ahead of our clock the announce is, in seconds.
+        ahead_secs: u64,
+    },
+    /// Timestamp is older than [`NODE_ANNOUNCE_MAX_AGE_SECS`].
+    Stale {
+        /// How far behind our clock the announce is, in seconds.
+        behind_secs: u64,
+    },
+    /// Structural defect: field length, character set, or attestation scope.
+    Malformed(String),
+}
+
+impl std::fmt::Display for AnnounceInvalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClockSkew { ahead_secs } => write!(
+                f,
+                "announce timestamp is {ahead_secs}s ahead of our clock \
+                 (tolerance {NODE_ANNOUNCE_FUTURE_TOLERANCE_SECS}s)"
+            ),
+            Self::Stale { behind_secs } => write!(
+                f,
+                "announce is stale ({behind_secs}s old, max {NODE_ANNOUNCE_MAX_AGE_SECS}s)"
+            ),
+            Self::Malformed(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for AnnounceInvalid {}
 
 /// Organization taxonomy — makes funding model visible.
 ///
@@ -407,59 +451,81 @@ impl NodeAnnounce {
     }
 
     /// Validate field lengths and timestamp freshness.
-    /// Returns `Ok(())` if all structural checks pass.
-    pub fn validate(&self, now: u64) -> Result<(), String> {
+    ///
+    /// Timestamp handling is tolerant in both directions: an announce may sit up
+    /// to [`NODE_ANNOUNCE_FUTURE_TOLERANCE_SECS`] *ahead* of our clock and up to
+    /// [`NODE_ANNOUNCE_MAX_AGE_SECS`] behind it. Peers' clocks drift by
+    /// milliseconds and `as_secs()` truncation turns that into whole-second
+    /// disagreement, so a zero forward tolerance rejects announces from
+    /// perfectly healthy peers.
+    pub fn validate(&self, now: u64) -> Result<(), AnnounceInvalid> {
         if self.node_name.len() > MAX_NODE_NAME_LEN {
-            return Err(format!("node_name exceeds {} bytes", MAX_NODE_NAME_LEN));
+            return Err(AnnounceInvalid::Malformed(format!(
+                "node_name exceeds {} bytes",
+                MAX_NODE_NAME_LEN
+            )));
         }
         if let Some(ref name) = self.org_name {
             if name.len() > MAX_ORG_NAME_LEN {
-                return Err(format!("org_name exceeds {} bytes", MAX_ORG_NAME_LEN));
+                return Err(AnnounceInvalid::Malformed(format!(
+                    "org_name exceeds {} bytes",
+                    MAX_ORG_NAME_LEN
+                )));
             }
         }
         if self.software_version.len() > MAX_SOFTWARE_VERSION_LEN {
-            return Err(format!(
+            return Err(AnnounceInvalid::Malformed(format!(
                 "software_version exceeds {} bytes",
                 MAX_SOFTWARE_VERSION_LEN
-            ));
+            )));
         }
         if !self
             .software_version
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
         {
-            return Err(
+            return Err(AnnounceInvalid::Malformed(
                 "software_version contains invalid characters (allowed: [a-zA-Z0-9.\\-])"
                     .to_string(),
-            );
+            ));
         }
         if let Some(ref cc) = self.country_code {
             if cc.len() != 3 || !cc.bytes().all(|b| b.is_ascii_uppercase()) {
-                return Err(
+                return Err(AnnounceInvalid::Malformed(
                     "country_code must be exactly 3 uppercase ASCII letters (ISO 3166-1 alpha-3)"
                         .to_string(),
-                );
+                ));
             }
         }
         if let Some(ref att) = self.identity_attestation {
             if att.signature_data.len() > MAX_ATTESTATION_DATA_SIZE {
-                return Err(format!(
+                return Err(AnnounceInvalid::Malformed(format!(
                     "identity_attestation signature_data exceeds {} bytes",
                     MAX_ATTESTATION_DATA_SIZE
-                ));
+                )));
             }
             if att.scope != "identity" {
-                return Err(format!(
+                return Err(AnnounceInvalid::Malformed(format!(
                     "identity_attestation scope must be \"identity\", got \"{}\"",
                     att.scope
-                ));
+                )));
             }
         }
-        if self.timestamp > now {
-            return Err("announce timestamp is in the future".to_string());
+        if self.timestamp > now.saturating_add(NODE_ANNOUNCE_FUTURE_TOLERANCE_SECS) {
+            return Err(AnnounceInvalid::ClockSkew {
+                ahead_secs: self.timestamp - now,
+            });
         }
-        if now - self.timestamp > NODE_ANNOUNCE_MAX_AGE_SECS {
-            return Err("announce is stale".to_string());
+        // `saturating_sub`, not `-`: the timestamp may legitimately sit up to
+        // NODE_ANNOUNCE_FUTURE_TOLERANCE_SECS *ahead* of `now`, so this
+        // subtraction is no longer guarded by the check above. Plain `-` would
+        // panic in debug and wrap to ~u64::MAX in release — reporting every
+        // in-tolerance announce as "stale" and silently defeating the tolerance
+        // in production while looking correct in review. Same pattern as
+        // `healing.rs`'s stale-announce eviction.
+        let behind_secs = now.saturating_sub(self.timestamp);
+        if behind_secs > NODE_ANNOUNCE_MAX_AGE_SECS {
+            return Err(AnnounceInvalid::Stale { behind_secs });
         }
         Ok(())
     }
@@ -595,9 +661,79 @@ mod tests {
         let announce = make_announce(&sk, &pk, now - 100);
         assert!(announce.validate(now).is_ok());
 
-        // Future: timestamp ahead of now
-        let announce = make_announce(&sk, &pk, now + 10);
+        // Future: beyond the forward tolerance.
+        // This previously asserted that `now + 10` was an error — a zero
+        // forward tolerance. Honest peers drift; see clock_skew tests below.
+        let announce = make_announce(&sk, &pk, now + NODE_ANNOUNCE_FUTURE_TOLERANCE_SECS + 1);
         assert!(announce.validate(now).is_err());
+    }
+
+    /// A peer whose clock is a shade ahead is healthy, not hostile.
+    ///
+    /// Measured on a live two-node pair: +0.112 s of offset. `as_secs()`
+    /// truncation turns that into a whole second of apparent disagreement on
+    /// ~10 % of announces, which under the old zero-tolerance rule scored 15
+    /// ban points a time and banned the peer for 24 h.
+    #[test]
+    fn announce_within_future_tolerance_is_accepted() {
+        let (sk, pk) = make_test_keypair();
+        let now = 1_700_010_000u64;
+        for ahead in [1, 2, 5, NODE_ANNOUNCE_FUTURE_TOLERANCE_SECS] {
+            let announce = make_announce(&sk, &pk, now + ahead);
+            assert!(
+                announce.validate(now).is_ok(),
+                "announce {ahead}s ahead must be accepted (tolerance is \
+                 {NODE_ANNOUNCE_FUTURE_TOLERANCE_SECS}s)"
+            );
+        }
+    }
+
+    #[test]
+    fn announce_beyond_future_tolerance_is_clock_skew() {
+        let (sk, pk) = make_test_keypair();
+        let now = 1_700_010_000u64;
+        let ahead = NODE_ANNOUNCE_FUTURE_TOLERANCE_SECS + 1;
+        let announce = make_announce(&sk, &pk, now + ahead);
+        // Must classify as ClockSkew, never Malformed: the network layer keys
+        // the ban penalty off this discriminant (1 point vs 15).
+        assert_eq!(
+            announce.validate(now),
+            Err(AnnounceInvalid::ClockSkew { ahead_secs: ahead })
+        );
+    }
+
+    /// Regression: the forward tolerance must not underflow the staleness check.
+    ///
+    /// `now - self.timestamp` was previously guarded by the `timestamp > now`
+    /// rejection above it. Adding a tolerance lets in-tolerance announces reach
+    /// that subtraction with `timestamp > now`, which panics in debug and — far
+    /// worse — wraps to ~u64::MAX in release, reporting every in-tolerance
+    /// announce as "stale" and silently defeating the whole fix in production.
+    #[test]
+    fn announce_within_tolerance_does_not_underflow_staleness_check() {
+        let (sk, pk) = make_test_keypair();
+        let now = 1_700_010_000u64;
+        let announce = make_announce(&sk, &pk, now + 1);
+        // Panics on `-` in debug; returns Err(Stale) on `-` in release.
+        assert_eq!(
+            announce.validate(now),
+            Ok(()),
+            "an announce 1s ahead must be accepted, not wrapped into 'stale'"
+        );
+    }
+
+    #[test]
+    fn stale_announce_reports_its_age() {
+        let (sk, pk) = make_test_keypair();
+        let now = 1_700_010_000u64;
+        let behind = NODE_ANNOUNCE_MAX_AGE_SECS + 42;
+        let announce = make_announce(&sk, &pk, now - behind);
+        assert_eq!(
+            announce.validate(now),
+            Err(AnnounceInvalid::Stale {
+                behind_secs: behind
+            })
+        );
     }
 
     #[test]
@@ -887,7 +1023,7 @@ mod tests {
         .unwrap();
         let result = announce.validate(1_700_000_000);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("scope must be \"identity\""));
+        assert!(result.unwrap_err().to_string().contains("scope must be \"identity\""));
     }
 
     #[test]
@@ -921,7 +1057,7 @@ mod tests {
         .unwrap();
         let result = announce.validate(1_700_000_000);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("exceeds"));
+        assert!(result.unwrap_err().to_string().contains("exceeds"));
     }
 
     // ── Country Code Tests ──
@@ -967,7 +1103,7 @@ mod tests {
         let now = 1_700_000_000u64;
         let mut announce = make_announce(&sk, &pk, now);
         announce.country_code = Some("US".to_string());
-        assert!(announce.validate(now).unwrap_err().contains("country_code"));
+        assert!(announce.validate(now).unwrap_err().to_string().contains("country_code"));
     }
 
     #[test]
@@ -976,7 +1112,7 @@ mod tests {
         let now = 1_700_000_000u64;
         let mut announce = make_announce(&sk, &pk, now);
         announce.country_code = Some("USAA".to_string());
-        assert!(announce.validate(now).unwrap_err().contains("country_code"));
+        assert!(announce.validate(now).unwrap_err().to_string().contains("country_code"));
     }
 
     #[test]
@@ -985,7 +1121,7 @@ mod tests {
         let now = 1_700_000_000u64;
         let mut announce = make_announce(&sk, &pk, now);
         announce.country_code = Some("12A".to_string());
-        assert!(announce.validate(now).unwrap_err().contains("country_code"));
+        assert!(announce.validate(now).unwrap_err().to_string().contains("country_code"));
     }
 
     #[test]

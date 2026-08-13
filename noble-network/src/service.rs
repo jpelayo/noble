@@ -2532,7 +2532,7 @@ fn handle_peer_exchange(
 
 /// Handle a validated (or invalid) node announce result.
 fn handle_gossip_node_announce(
-    result: Result<noble_core::NodeAnnounce, String>,
+    result: Result<noble_core::NodeAnnounce, AnnounceReject>,
     source: &PeerId,
     peer_bytes: Vec<u8>,
     peer_manager: &mut PeerManager,
@@ -2628,13 +2628,19 @@ fn handle_gossip_node_announce(
                 announce: Box::new(announce),
             })
         }
-        Err(reason) => {
-            tracing::warn!(task = "gossip_receive", %source, %reason, "invalid node announce");
-            let reason_text = format!("invalid announce: {reason}");
+        Err(AnnounceReject { category, detail }) => {
+            tracing::warn!(
+                task = "gossip_receive",
+                %source,
+                reason = %detail,
+                category = BanCategory::from(category).as_str(),
+                "invalid node announce"
+            );
+            let reason_text = format!("invalid announce: {detail}");
             let outcome = peer_manager.record_misbehavior(
                 source,
                 BanReason::new(
-                    BanCategory::InvalidAnnounce,
+                    BanCategory::from(category),
                     reason_text.clone(),
                 ),
             );
@@ -3583,6 +3589,41 @@ fn parse_node_role(s: &str) -> Option<noble_core::NodeRole> {
     }
 }
 
+/// A rejected NodeAnnounce, carrying what the peer should be charged for it.
+///
+/// The category matters: a drifted clock (`ClockSkew`, penalty 1) is an
+/// operational fault, while a malformed or forged record (`InvalidAnnounce`,
+/// penalty 15) is misbehaviour. Collapsing both into one category banned honest
+/// peers for 24 h over a sub-second offset.
+struct AnnounceReject {
+    category: noble_core::BanCategoryCode,
+    detail: String,
+}
+
+impl From<String> for AnnounceReject {
+    /// Structural/decode failures are misbehaviour by default.
+    fn from(detail: String) -> Self {
+        Self {
+            category: noble_core::BanCategoryCode::InvalidAnnounce,
+            detail,
+        }
+    }
+}
+
+/// What to charge a peer for a failed announce validation.
+///
+/// A drifted clock is an operator problem; everything else is misbehaviour.
+fn announce_reject_category(
+    invalid: &noble_core::AnnounceInvalid,
+) -> noble_core::BanCategoryCode {
+    match invalid {
+        noble_core::AnnounceInvalid::ClockSkew { .. } => noble_core::BanCategoryCode::ClockSkew,
+        noble_core::AnnounceInvalid::Stale { .. } | noble_core::AnnounceInvalid::Malformed(_) => {
+            noble_core::BanCategoryCode::InvalidAnnounce
+        }
+    }
+}
+
 /// Convert wire-format NodeAnnounce fields to a `noble_core::NodeAnnounce`,
 /// then validate signature, field lengths, and timestamp freshness.
 #[allow(clippy::too_many_arguments)]
@@ -3615,7 +3656,7 @@ fn convert_and_validate_announce(
     attestation_scope: Option<&str>,
     attestation_fingerprint: Option<&[u8]>,
     attestation_data: Option<&[u8]>,
-) -> Result<noble_core::NodeAnnounce, String> {
+) -> Result<noble_core::NodeAnnounce, AnnounceReject> {
     let identity_key = noble_crypto::NoblePublicKey::from_wire_bytes(identity_key_bytes)
         .map_err(|e| format!("invalid identity key: {e}"))?;
 
@@ -3637,7 +3678,8 @@ fn convert_and_validate_announce(
                 return Err(format!(
                     "attestation fingerprint must be 32 bytes, got {}",
                     fp.len()
-                ));
+                )
+                .into());
             }
             let mut fingerprint = [0u8; 32];
             fingerprint.copy_from_slice(fp);
@@ -3649,14 +3691,18 @@ fn convert_and_validate_announce(
             })
         }
         (None, None, None, None) => None,
-        _ => return Err("attestation fields must be all present or all absent".to_string()),
+        _ => {
+            return Err("attestation fields must be all present or all absent"
+                .to_string()
+                .into())
+        }
     };
 
     // Decode hex chain tip hash (32 bytes)
     let chain_tip_hash = if let Some(hex_str) = chain_tip_hash_hex {
         let bytes = hex::decode(hex_str).map_err(|e| format!("invalid chain_tip_hash hex: {e}"))?;
         if bytes.len() != 32 {
-            return Err(format!("chain_tip_hash must be 32 bytes, got {}", bytes.len()));
+            return Err(format!("chain_tip_hash must be 32 bytes, got {}", bytes.len()).into());
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
@@ -3669,7 +3715,7 @@ fn convert_and_validate_announce(
     let proposed_hash = if let Some(hex_str) = proposed_hash_hex {
         let bytes = hex::decode(hex_str).map_err(|e| format!("invalid proposed_hash hex: {e}"))?;
         if bytes.len() != 32 {
-            return Err(format!("proposed_hash must be 32 bytes, got {}", bytes.len()));
+            return Err(format!("proposed_hash must be 32 bytes, got {}", bytes.len()).into());
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
@@ -3714,18 +3760,83 @@ fn convert_and_validate_announce(
         .unwrap_or_default()
         .as_secs();
 
-    announce
-        .validate(now)
-        .map_err(|e| format!("validation: {e}"))?;
-    announce
-        .verify_signature()
-        .map_err(|e| format!("signature: {e}"))?;
+    if let Err(invalid) = announce.validate(now) {
+        // Log the magnitude. Without it, 1 second and 1 hour of skew are
+        // indistinguishable in the record, and an operator has no way to tell
+        // honest drift from a genuinely broken clock.
+        if let noble_core::AnnounceInvalid::ClockSkew { ahead_secs } = &invalid {
+            tracing::warn!(
+                task = "gossip_receive",
+                ahead_secs,
+                announce_ts = announce.timestamp,
+                local_now = now,
+                tolerance_secs = noble_core::NODE_ANNOUNCE_FUTURE_TOLERANCE_SECS,
+                "NodeAnnounce rejected: peer's clock is ahead of ours"
+            );
+        }
+        return Err(AnnounceReject {
+            category: announce_reject_category(&invalid),
+            detail: format!("validation: {invalid}"),
+        });
+    }
+    announce.verify_signature().map_err(|e| AnnounceReject {
+        category: noble_core::BanCategoryCode::InvalidAnnounce,
+        detail: format!("signature: {e}"),
+    })?;
 
     Ok(announce)
 }
 
 #[cfg(test)]
 mod tests {
+    // --- NodeAnnounce rejection is priced by cause, not lumped together ---
+
+    /// A peer whose clock drifted must not be charged as a misbehaving peer.
+    ///
+    /// The live pair banned itself for 24 h over a measured +0.112 s offset:
+    /// every rejection scored 15 as `InvalidAnnounce`. Clock skew is now its own
+    /// category at penalty 1, while forged and malformed records still cost 15.
+    #[test]
+    fn clock_skew_is_priced_apart_from_malformed_announces() {
+        use crate::peer_manager::BanCategory;
+        use noble_core::{AnnounceInvalid, BanCategoryCode};
+
+        let skew = AnnounceInvalid::ClockSkew { ahead_secs: 63 };
+        assert_eq!(
+            super::announce_reject_category(&skew),
+            BanCategoryCode::ClockSkew
+        );
+        assert_eq!(BanCategory::from(BanCategoryCode::ClockSkew).penalty(), 1);
+
+        // Everything else stays misbehaviour at the original penalty.
+        for other in [
+            AnnounceInvalid::Stale { behind_secs: 7_200 },
+            AnnounceInvalid::Malformed("node_name exceeds 64 bytes".into()),
+        ] {
+            assert_eq!(
+                super::announce_reject_category(&other),
+                BanCategoryCode::InvalidAnnounce,
+                "{other} must remain misbehaviour"
+            );
+        }
+        assert_eq!(
+            BanCategory::from(BanCategoryCode::InvalidAnnounce).penalty(),
+            15
+        );
+    }
+
+    /// Decode/structural failures reach the scorer as misbehaviour, not skew.
+    #[test]
+    fn structural_reject_defaults_to_invalid_announce() {
+        let reject: super::AnnounceReject = "chain_tip_hash must be 32 bytes, got 31"
+            .to_string()
+            .into();
+        assert_eq!(
+            reject.category,
+            noble_core::BanCategoryCode::InvalidAnnounce
+        );
+    }
+
     // --- M1: votes must be verified BEFORE gossip re-propagation ---
 
     #[test]
