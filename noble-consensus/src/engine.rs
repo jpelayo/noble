@@ -1100,6 +1100,8 @@ impl CycleEngine {
                         let unique_witness =
                             self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash);
                         let dual_required = new_height == noble_core::GENESIS_HEIGHT;
+                        // Display only: genesis is presented as "cycle 0"
+                        // regardless of how many founding cycles it took.
                         let vote_cycle =
                             if new_height == noble_core::GENESIS_HEIGHT { 0 } else { completed_cycle };
                         outputs.push(CycleIo::StoreBlockVotes {
@@ -1117,7 +1119,17 @@ impl CycleEngine {
                                 // names — this is the part a node importing
                                 // history can actually re-verify.
                                 certificate: Some(crate::history::WitnessCertificate {
-                                    cycle: vote_cycle,
+                                    // G1: bind to the cycle the votes were
+                                    // actually cast in — NOT the display value
+                                    // above. Genesis used to force this to 0
+                                    // while its votes carried the real founding
+                                    // cycle, so any chain founded later than
+                                    // cycle 0 produced a certificate that could
+                                    // never verify: the node condemned its own
+                                    // genesis on restart, and every peer that
+                                    // tried to join it refused the chain as
+                                    // "not properly witnessed".
+                                    cycle: completed_cycle,
                                     candidate_hash,
                                     votes: self
                                         .vote_mgr

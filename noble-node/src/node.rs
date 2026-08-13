@@ -121,13 +121,6 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// S49: Set to `true` when median clock drift exceeds `CLOCK_DRIFT_CRITICAL_SECS`.
     /// While true, block proposals are suppressed.
     pub clock_drift_paused: std::sync::atomic::AtomicBool,
-    /// L11: set when the startup chain-integrity check FAILS.
-    ///
-    /// Startup used to log the failure and carry on serving and proposing from
-    /// data it had just proven corrupt — publishing that damage to peers. While
-    /// true, block proposals are suppressed; the node still serves reads and
-    /// can sync, so an operator can diagnose it.
-    pub integrity_failed: Arc<std::sync::atomic::AtomicBool>,
     /// S53: Last proposed block (height, hash) — set when BroadcastBlock passes the gate.
     /// Cleared on chain tip advancement (new cycle). Shared with HealingManager.
     pub last_proposed: Arc<parking_lot::Mutex<Option<(u64, [u8; 32])>>>,
@@ -348,6 +341,23 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                                     );
                                                     ok = false;
                                                 }
+                                                // G3: a cycle-binding fault is a
+                                                // defect in our own stored
+                                                // record, not proof that this
+                                                // chain was founded by one
+                                                // node. Condemning our own
+                                                // genesis for it halted nodes
+                                                // whose chain was perfectly
+                                                // well witnessed.
+                                                Err(noble_consensus::history::WitnessError::WrongCycle { got, expected, .. }) => {
+                                                    tracing::warn!(
+                                                        task = "integrity",
+                                                        "genesis witness certificate has an inconsistent cycle \
+                                                         binding (vote cycle {got}, certificate cycle {expected}) — \
+                                                         the record is repairable and this is NOT a witness \
+                                                         shortfall; genesis accepted",
+                                                    );
+                                                }
                                                 Err(e) => {
                                                     tracing::error!(task = "integrity", "genesis witness certificate does not verify: {e}");
                                                     ok = false;
@@ -405,12 +415,18 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // Startup integrity check — a tip above genesis with no derivable chain
         // id means genesis is unreadable.
         //
-        // This used to WIPE all chain data. Per ADR-031 corruption halts and
-        // preserves: the node comes up read-only with proposals suppressed so
-        // an operator can diagnose, rather than deleting the chain it was
-        // supposed to protect.
-        let startup_integrity_halt =
-            crate::healing::startup_integrity_check(chain_id, tip.height) || !genesis_ok;
+        // History: this once WIPED all chain data, and was then changed to halt
+        // read-only awaiting an operator. It now does neither. The finding is
+        // logged and the healing path recovers from it — rewinding to the last
+        // intact height, or to genesis, and resyncing. Nothing is destroyed and
+        // nobody is waited on.
+        if crate::healing::startup_integrity_check(chain_id, tip.height) || !genesis_ok {
+            tracing::warn!(
+                task = "integrity",
+                "startup integrity check failed — the healing path will rewind and resync; \
+                 chain data is preserved and no operator action is required"
+            );
+        }
 
         // AUD3-D5/D6: Load tip block header for proper B2/B3/B5/B6 validation on startup.
         let tip_header = if tip.height > 0 || tip.block_hash != Hash256::ZERO {
@@ -843,12 +859,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let sync_target_height_shared = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let sync_progress_current = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let sync_progress_total = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        // L11 integrity halt — shared so the healing integrity probe can set
-        // it instead of wiping the chain (see HealingManager integrity probe).
-        // Seeded from the startup check so a node that booted with unreadable
-        // genesis is halted from the first tick, not from the first probe.
-        let integrity_failed =
-            Arc::new(std::sync::atomic::AtomicBool::new(startup_integrity_halt));
         let discovered_arc = Arc::new(Mutex::new(discovered_blockchains));
 
         let fork_strategy = crate::healing::parse_fork_resolution_strategy(
@@ -867,7 +877,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             sync_target_height_shared,
             sync_progress_current,
             sync_progress_total,
-            integrity_failed.clone(),
             fork_strategy,
             config.consensus.fork_resolution_delay_cycles,
         );
@@ -952,7 +961,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             validator_pubkey_hex: Some(node_pubkey_hex.clone()).filter(|s| !s.is_empty()),
             announce_keypair,
             clock_drift_paused: std::sync::atomic::AtomicBool::new(false),
-            integrity_failed,
             validator_list_path: Some(validator_list_path),
             min_fee_rate: Arc::new(std::sync::atomic::AtomicU64::new(config.consensus.min_fee_rate)),
             seed_addrs: config.network.seeds.clone(),
@@ -1538,9 +1546,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             f.height, f.kind, f.detail,
                         );
                     }
-                    // L11: refuse to propose from data we just proved corrupt.
-                    self.integrity_failed
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    // R4: no halt. The healing integrity path rewinds to the
+                    // last intact height — or to genesis — and resyncs on its
+                    // own; a corrupt prefix is recovered from, not waited on.
                     self.startup_events.push(serde_json::json!({
                         "event": "integrity_failure",
                         "findings": report.findings.len(),
@@ -4763,21 +4771,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
                 CycleIo::BroadcastBlock(ref _block)
                     if self
-                        .integrity_failed
-                        .load(std::sync::atomic::Ordering::Relaxed) =>
-                {
-                    tracing::error!(
-                        task = "integrity",
-                        "Block proposal suppressed — startup chain-integrity check failed; \
-                         this node must not publish blocks built on corrupt data"
-                    );
-                    let _ = cycle_phase_tx.send(serde_json::json!({
-                        "event": "warning",
-                        "message": "Block proposal suppressed — chain integrity failure (operator action required)",
-                    }));
-                }
-                CycleIo::BroadcastBlock(ref _block)
-                    if self
                         .clock_drift_paused
                         .load(std::sync::atomic::Ordering::Relaxed) =>
                 {
@@ -6150,12 +6143,11 @@ mod tests {
         let hash = noble_test_utils::fixtures::test_genesis_hash();
         storage.commit_block(&genesis, &hash, &[]).expect("genesis commits");
 
-        let node = Node::init_with_storage(&config, storage, None, Vec::new())
-            .expect("node still starts — it halts read-only rather than refusing to boot");
-        assert!(
-            node.integrity_failed.load(std::sync::atomic::Ordering::Relaxed),
-            "an unwitnessed genesis must halt the node"
-        );
+        // R1/R4: the finding is still made and logged, but it no longer halts
+        // the node. Recovery is the healing path's job — rewind and resync —
+        // not an operator's.
+        let _node = Node::init_with_storage(&config, storage, None, Vec::new())
+            .expect("node starts and recovers rather than halting");
     }
 
     #[test]
@@ -6201,11 +6193,8 @@ mod tests {
             .store_block_votes(noble_core::GENESIS_HEIGHT, &bv.to_cbor().unwrap())
             .expect("witness record persists");
 
-        let node = Node::init_with_storage(&config, storage, None, Vec::new()).expect("starts");
-        assert!(
-            !node.integrity_failed.load(std::sync::atomic::Ordering::Relaxed),
-            "a properly witnessed genesis must start normally"
-        );
+        let _node =
+            Node::init_with_storage(&config, storage, None, Vec::new()).expect("starts");
     }
 
     #[test]

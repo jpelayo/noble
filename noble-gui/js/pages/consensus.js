@@ -851,11 +851,11 @@ export function init(root, ctx) {
         // After sync finishes, all panels need a full refresh — the timeline,
         // cycle display, vote tallies, and validator list are all stale.
         scheduleReload(loadCycle, loadTimeline, loadVoteTallies, loadValidators);
-      } else if (data.event === 'sync_blocked' || data.event === 'integrity_failure') {
-        // Sync is not progressing and cannot, without an operator. Rendering
-        // this as the usual yellow "catching up" banner is what let a halted
-        // node look like a busy one for hours.
-        showBlockedBanner(data.message || 'Sync blocked — operator action required');
+      } else if (data.event === 'integrity_recovery' || data.event === 'sync_source_rejected'
+                 || data.event === 'adoption_declined' || data.event === 'genesis_requested') {
+        // The node resolves these itself. Show it as work in progress, not as a
+        // failure demanding attention — there is nothing for an operator to do.
+        paintBanner('sync', data.message || 'Recovering automatically\u2026');
       } else if (data.event === 'integrity_repaired') {
         updateSyncBanner(false);
         scheduleReload(loadCycle, loadTimeline, loadVoteTallies, loadValidators);
@@ -922,15 +922,6 @@ export function init(root, ctx) {
   // ── Sync banner management ──
   const syncBanner = root.querySelector('#cs-sync-banner');
 
-  // The node decides whether it is blocked (AlignmentState::Blocked). This
-  // page does not maintain its own opinion — the previous sticky local flag
-  // was a fourth independent derivation of chain phase, which is the class of
-  // bug M2 exists to remove.
-  const isBlocked = () => window.state?.alignment?.state === 'Blocked';
-  const blockedReason = () =>
-    window.state?.alignment?.blockedReason ||
-    'Sync blocked — operator action required';
-
   function paintBanner(kind, message) {
     if (!syncBanner) return;
     const err = kind === 'blocked';
@@ -941,19 +932,8 @@ export function init(root, ctx) {
     syncBanner.textContent = message;
   }
 
-  function showBlockedBanner(message) {
-    paintBanner('blocked', message);
-  }
-
   function updateSyncBanner(syncing, targetHeight, currentHeight, progressPct) {
     if (!syncBanner) return;
-    // Blocked outranks everything: progress chatter must never paint over a
-    // halted node. Asking the shared state each time means a page opened after
-    // the blocking event still renders correctly.
-    if (isBlocked()) {
-      paintBanner('blocked', blockedReason());
-      return;
-    }
     if (syncing) {
       paintBanner('sync', '');
       syncBanner.style.display = 'block';
@@ -1966,20 +1946,6 @@ export function init(root, ctx) {
         }
       };
       window._nobleTick.add(tickFn);
-      return;
-    }
-
-    if (!sane && isBlocked()) {
-      // Not eligible to participate: a running phase countdown here reads as
-      // "this node is taking part in consensus", which is the opposite of the
-      // truth while it is halted. Show the state instead of a clock.
-      if (tickFn) { window._nobleTick.remove(tickFn); tickFn = null; }
-      csPhaseName.textContent = 'Halted';
-      csPhaseRemaining.textContent = '—';
-      csCycleRemaining.textContent = '—';
-      csValidator.textContent = '—';
-      csCycleInfo.textContent = 'Not participating';
-      csPipeline.innerHTML = `<div style="text-align:center;padding:var(--gap);color:var(--text-muted);font-size:var(--font-size-sm)">${escapeHtml(blockedReason())}</div>`;
       return;
     }
 

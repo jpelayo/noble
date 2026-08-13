@@ -112,6 +112,12 @@ pub struct WitnessCertificate {
     pub votes: Vec<crate::vote::PorVote>,
 }
 
+/// How far a vote's cycle may sit from the certificate's declared cycle.
+///
+/// Mirrors the ±1 bootstrap tolerance in `VoteManager::record_vote`: the two
+/// must agree, or a certificate can record a vote that can never be verified.
+pub const CYCLE_BINDING_TOLERANCE: u64 = 1;
+
 /// Why a witness certificate failed verification.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WitnessError {
@@ -127,11 +133,27 @@ impl WitnessCertificate {
     /// Verify every vote and return the number of **distinct** voter keys.
     ///
     /// Each vote must carry a valid signature and be bound to this
-    /// certificate's candidate and cycle — otherwise votes for some other block
-    /// could be presented as support for this one. Distinct keys are counted
-    /// (not votes) because one validator casting both R1 and R2 is still one
-    /// witness; counting votes would let a single validator appear to satisfy
-    /// the Dual-Witness rule alone.
+    /// certificate's candidate — otherwise votes for some other block could be
+    /// presented as support for this one. Distinct keys are counted (not votes)
+    /// because one validator casting both R1 and R2 is still one witness;
+    /// counting votes would let a single validator appear to satisfy the
+    /// Dual-Witness rule alone.
+    ///
+    /// **Cycle binding (G2).** The cycle is checked within
+    /// [`CYCLE_BINDING_TOLERANCE`], not for exact equality, because
+    /// `VoteManager::record_vote` deliberately admits votes ±1 cycle during
+    /// bootstrap — peers crossing a phase boundary compute cycle numbers that
+    /// differ by one. Demanding exact equality here made a certificate
+    /// *unverifiable by construction* whenever two honest validators witnessed
+    /// a block from adjacent cycles: the tally accepted them, the certificate
+    /// recorded them, and verification then rejected the whole chain as
+    /// unwitnessed. Whatever a certificate is permitted to contain must be
+    /// verifiable.
+    ///
+    /// This does not weaken replay protection. `candidate_hash` is inside the
+    /// signed payload (see [`crate::vote::PorVote::signing_payload`]), so a
+    /// vote for one block can never be presented as support for another — which
+    /// is the property the cycle check was mistakenly relied upon to provide.
     pub fn verify(&self) -> Result<usize, WitnessError> {
         use std::collections::HashSet;
         let mut distinct: HashSet<Vec<u8>> = HashSet::new();
@@ -144,7 +166,7 @@ impl WitnessCertificate {
                     expected: self.candidate_hash.to_string(),
                 });
             }
-            if vote.cycle != self.cycle {
+            if vote.cycle.abs_diff(self.cycle) > CYCLE_BINDING_TOLERANCE {
                 return Err(WitnessError::WrongCycle {
                     index,
                     got: vote.cycle,
@@ -290,6 +312,72 @@ mod tests {
         let (v2, _) = signed_vote(5, candidate, 1);
         let cert = WitnessCertificate { cycle: 5, candidate_hash: candidate, votes: vec![v1, v2] };
         assert_eq!(cert.verify().unwrap(), 2, "two distinct validators = two witnesses");
+    }
+
+    /// G2 regression: the tally admits ±1 cycle, so the certificate must too.
+    ///
+    /// `VoteManager::record_vote` deliberately accepts a vote one cycle either
+    /// side of the current one during bootstrap — peers crossing a phase
+    /// boundary disagree by one. Those votes carry the block, get recorded in
+    /// the certificate, and under exact-match verification made the whole
+    /// certificate unverifiable. A genesis witnessed by two honest validators
+    /// was then reported as unwitnessed, the chain was refused permanently, and
+    /// the node halted. Fails before the tolerance was introduced.
+    #[test]
+    fn certificate_accepts_the_adjacent_cycle_the_tally_already_accepted() {
+        let candidate = Hash256::from_bytes([0x91; 32]);
+        let (v_now, _) = signed_vote(7, candidate, 1);
+        let (v_ahead, _) = signed_vote(8, candidate, 1);
+        let (v_behind, _) = signed_vote(6, candidate, 1);
+        let cert = WitnessCertificate {
+            cycle: 7,
+            candidate_hash: candidate,
+            votes: vec![v_now, v_ahead, v_behind],
+        };
+        assert_eq!(
+            cert.verify().unwrap(),
+            3,
+            "votes the tally accepted must be verifiable, not silently fatal"
+        );
+    }
+
+    /// The tolerance is exactly ±1 — it is not an open door.
+    #[test]
+    fn certificate_still_rejects_a_vote_from_an_unrelated_cycle() {
+        let candidate = Hash256::from_bytes([0x92; 32]);
+        let (v_ok, _) = signed_vote(7, candidate, 1);
+        let (v_far, _) = signed_vote(7 + CYCLE_BINDING_TOLERANCE + 1, candidate, 1);
+        let cert = WitnessCertificate {
+            cycle: 7,
+            candidate_hash: candidate,
+            votes: vec![v_ok, v_far],
+        };
+        assert!(matches!(
+            cert.verify(),
+            Err(WitnessError::WrongCycle { .. })
+        ));
+    }
+
+    /// G1 regression: a genesis founded at cycle N must produce a certificate
+    /// that verifies. Genesis used to force the certificate's cycle to 0 while
+    /// its votes carried N, so founding at any cycle but the very first made
+    /// the foundation permanently unprovable.
+    #[test]
+    fn a_genesis_founded_after_the_first_cycle_still_proves_its_witnesses() {
+        let candidate = Hash256::from_bytes([0x93; 32]);
+        const FOUNDING_CYCLE: u64 = 13; // as seen live: founding took 13 cycles
+        let (v1, _) = signed_vote(FOUNDING_CYCLE, candidate, 1);
+        let (v2, _) = signed_vote(FOUNDING_CYCLE, candidate, 1);
+        let cert = WitnessCertificate {
+            cycle: FOUNDING_CYCLE,
+            candidate_hash: candidate,
+            votes: vec![v1, v2],
+        };
+        assert_eq!(
+            cert.verify().unwrap(),
+            2,
+            "a chain founded at cycle {FOUNDING_CYCLE} is as legitimate as one founded at 0"
+        );
     }
 
     #[test]

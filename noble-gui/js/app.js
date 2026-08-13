@@ -126,7 +126,7 @@ const { state, subscribe, getState } = createStore({
   // noble_getSyncStatus. Every surface renders THIS. Deriving it per-widget is
   // what produced a sidebar reading "CREATING" beside a banner reading
   // "catching up to height 197" while both were describing the same node.
-  alignment: { state: null, severity: 'zero', blockedReason: null, height: 0, highestKnown: 0 },
+  alignment: { state: null, severity: 'zero', height: 0, highestKnown: 0 },
 });
 
 const store = { state, subscribe, getState };
@@ -385,8 +385,6 @@ const ALIGNMENT_SEVERITY = {
   // Verifying: connected but no peer has announced a tip yet — evidence-free,
   // rendered like a transient sync state, never green.
   Verifying: 'syncing', 'Catching Up': 'syncing',
-  // Node halted and waiting on an operator — never renders as progress.
-  Blocked: 'high',
 };
 
 // How long a calmer state (leaving Syncing, going Isolated) must persist before
@@ -402,12 +400,9 @@ const _align = {
   timer: null,
 };
 
-// States that must appear IMMEDIATELY rather than waiting out the debounce.
-// Blocked is the most urgent of all: the node has stopped and is waiting for an
-// operator, so holding the previous (healthier-looking) state on screen is
-// exactly the wrong trade — the debounce exists to stop flapping, not to delay
-// bad news.
-const _alignUrgent = (s) => s === 'Syncing' || s === 'Diverged' || s === 'Blocked';
+// States that must appear IMMEDIATELY rather than waiting out the debounce:
+// the debounce exists to stop flapping, not to delay bad news.
+const _alignUrgent = (s) => s === 'Syncing' || s === 'Diverged';
 
 // Map raw (state, height, highest) to the state we should DISPLAY, with heights
 // as the source of truth. Mutates _align.target (monotonic).
@@ -417,12 +412,9 @@ function _alignAuthoritative(st, height, highest) {
   if (highest > _align.target) _align.target = highest; // never let a 0-blip drop the target
   const target = Math.max(highest, _align.target);
 
-  // States the node asserts about itself are never second-guessed here.
-  // Blocked means an operator is required; rewriting it to 'Syncing' because
-  // a peer is ahead would put the sidebar right back to describing a halted
-  // node as a busy one — the exact failure M2 exists to remove. Diverged is
-  // likewise a conclusion, not a symptom.
-  if (st === 'Blocked' || st === 'Diverged') return st;
+  // Diverged is a conclusion the node asserts about itself, not a symptom —
+  // never second-guessed here.
+  if (st === 'Diverged') return st;
 
   if (height > 0 && target > height) return 'Syncing';  // behind -> always Syncing
   if (st === 'Syncing') return height > 0 ? 'Aligned' : 'Bootstrapping';
@@ -438,7 +430,6 @@ async function updateForkStatus() {
   state.alignment = {
     state: sync.state,
     severity: sync.severity || ALIGNMENT_SEVERITY[sync.state] || 'zero',
-    blockedReason: sync.blocked_reason || null,
     height: sync.current_height,
     highestKnown: sync.highest_known,
     progress: sync.progress,
@@ -450,7 +441,6 @@ function onAlignmentChanged(data) {
   state.alignment = {
     state: data.state,
     severity: data.severity || ALIGNMENT_SEVERITY[data.state] || 'zero',
-    blockedReason: data.blocked_reason || null,
     height: data.height,
     highestKnown: data.highest_known,
     progress: data.progress,
@@ -497,15 +487,7 @@ function paintAlignment(bar, st, height, highestKnown, cyclesRemaining) {
   const detail = document.getElementById('fork-status-detail');
   bar.dataset.severity = ALIGNMENT_SEVERITY[st] || 'zero';
 
-  if (st === 'Blocked') {
-    // Surface the node's own reason rather than a bare label — this bar is the
-    // one thing visible from every page, so it should say what is wrong, not
-    // just that something is.
-    label.textContent = 'Blocked';
-    const reason = state.alignment?.blockedReason;
-    detail.textContent = reason || 'operator action required';
-    detail.title = reason || '';
-  } else if (st === 'Syncing') {
+  if (st === 'Syncing') {
     const h = +height || 0;
     const tgt = Math.max(+highestKnown || 0, _align.target, h);
     label.innerHTML = '<span class="fork-sync-spinner"></span>Syncing';

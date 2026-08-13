@@ -95,6 +95,10 @@ const SYNC_RETRY_SECS: u64 = 10;
 const SYNC_PEER_MAX_FAILURES: u32 = 2;
 
 /// K3-04: max per-peer tip-failure records kept (bounded memory).
+/// R2: how long a peer whose chain we refused is skipped as a sync source.
+/// Bounded so a peer that later re-founds correctly is not shunned forever.
+const REJECTED_SOURCE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
 const TIP_QUARANTINE_CAP: usize = 256;
 /// K3-04: base quarantine after repeated failed tip substantiation (secs).
 const TIP_QUARANTINE_BASE_SECS: u64 = 60;
@@ -361,17 +365,14 @@ pub struct HealingManager<S: StorageEngine + Send + Sync + 'static> {
     sync_progress_current: Arc<AtomicU64>,
     /// Overall sync target height — shared with RPC/GUI.
     sync_progress_total: Arc<AtomicU64>,
-    /// L11 read-only integrity halt, shared with `Node`. Set when chain data
-    /// is proven damaged and no intact prefix could be recovered; suppresses
-    /// block proposals until an operator intervenes.
-    integrity_failed: Arc<AtomicBool>,
     /// Blocks handed to us for import, accepted or rejected. See
     /// [`HealingManager::sync_blocks_delivered`].
     sync_blocks_delivered: Arc<AtomicU64>,
-    /// Set when the node cannot progress without an operator. Feeds
-    /// `AlignmentState::Blocked` so the halt is decided once, here, instead of
-    /// being inferred independently by each GUI widget.
-    blocked_reason: Option<String>,
+    /// R2: peers whose chain we refused, with when we refused it. Skipped as
+    /// sync sources until [`REJECTED_SOURCE_TTL`] passes, so a peer that later
+    /// re-founds correctly is not shunned forever. This replaced a halt: the
+    /// node used to stop entirely rather than just stop pulling from one peer.
+    rejected_sync_sources: HashMap<Vec<u8>, std::time::Instant>,
 
     // ── Fork state ──
     fork_visible: bool,
@@ -456,7 +457,6 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         sync_target_height_shared: Arc<AtomicU64>,
         sync_progress_current: Arc<AtomicU64>,
         sync_progress_total: Arc<AtomicU64>,
-        integrity_failed: Arc<AtomicBool>,
         fork_resolution_strategy: ForkResolutionStrategy,
         fork_resolution_delay_cycles: u32,
     ) -> Self {
@@ -469,9 +469,8 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             sync_target_height_shared,
             sync_progress_current,
             sync_progress_total,
-            integrity_failed,
             sync_blocks_delivered: Arc::new(AtomicU64::new(0)),
-            blocked_reason: None,
+            rejected_sync_sources: HashMap::new(),
             fork_visible: false,
             fork_common_ancestor: None,
             healing_phase: HealingPhase::Idle,
@@ -646,7 +645,6 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
     /// Shared L11 integrity halt. Exposed so `Node` and tests observe the same
     /// flag that forces [`AlignmentState::Blocked`].
-    pub fn integrity_failed(&self) -> &Arc<AtomicBool> { &self.integrity_failed }
 
     /// Returns true if we are in the Fetching state and this height is in the manifest.
     pub fn is_sync_block(&self, height: u64) -> bool {
@@ -690,6 +688,68 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         match &self.sync_state {
             SyncState::Fetching { peer, .. } | SyncState::AwaitingManifest { peer, .. } => Some(peer),
             SyncState::Idle => None,
+        }
+    }
+
+    /// R2: stop using the current peer as a sync source and stay on our chain.
+    ///
+    /// Replaces the old operator halt. A peer whose chain we refuse is a
+    /// statement about *that peer*; this node keeps its own chain, keeps
+    /// proposing, and simply stops pulling from that source. The peer is
+    /// remembered so the same chain is not immediately re-attempted, and the
+    /// entry ages out so a peer that re-founds correctly can be used again.
+    fn drop_sync_source(&mut self, reason: &str) {
+        if let Some(peer) = self.sync_peer().cloned() {
+            tracing::warn!(
+                task = "sync",
+                peer = %hex::encode(&peer),
+                "refusing this peer's chain ({reason}) — dropping it as a sync source and \
+                 continuing on our own chain"
+            );
+            self.rejected_sync_sources.insert(peer, std::time::Instant::now());
+        } else {
+            tracing::warn!(
+                task = "sync",
+                "refusing an offered chain ({reason}) — continuing on our own chain"
+            );
+        }
+    }
+
+    /// True if this peer's chain was refused recently enough to still skip.
+    fn is_rejected_sync_source(&self, peer: &[u8]) -> bool {
+        self.rejected_sync_sources
+            .get(peer)
+            .is_some_and(|at| at.elapsed() < REJECTED_SOURCE_TTL)
+    }
+
+    /// R3: ask peers for genesis rather than halting for an operator.
+    ///
+    /// Genesis is servable over `GetBlocks` like any other block, so a node
+    /// without one requests it. With no peers to ask there is nothing to do
+    /// here — the engine keeps proposing a genesis candidate under the normal
+    /// Dual-Witness rules, which is the founding path, unchanged.
+    fn request_genesis_from_peers(&mut self) {
+        self.rejected_sync_sources
+            .retain(|_, at| at.elapsed() < REJECTED_SOURCE_TTL);
+        let (peer, _) = self.select_sync_peer(noble_core::GENESIS_HEIGHT, None);
+        match peer {
+            Some(p) if !self.is_rejected_sync_source(&p) => {
+                tracing::info!(
+                    task = "sync",
+                    peer = %hex::encode(&p),
+                    "no genesis yet — requesting it over the vote-carrying path"
+                );
+                self.send_network(NetworkCommand::RequestBlockByHeight {
+                    peer_id: p,
+                    height: noble_core::GENESIS_HEIGHT,
+                });
+            }
+            _ => {
+                tracing::info!(
+                    task = "sync",
+                    "no genesis and no usable peer to ask — continuing to participate in founding"
+                );
+            }
         }
     }
 
@@ -852,25 +912,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
         let progress = if highest_known == 0 { 0.0 } else { height as f64 / highest_known as f64 };
 
-        // A blocked node is blocked regardless of what the peer topology
-        // would otherwise imply — an operator-halted node must never render as
-        // "Syncing" or "Creating". Integrity halt is authoritative even if
-        // `blocked_reason` was not set locally (it is shared with `Node`).
-        let blocked_reason = if self.integrity_failed.load(Ordering::Relaxed) {
-            Some(
-                self.blocked_reason.clone().unwrap_or_else(|| {
-                    "Chain integrity failure — node halted read-only".to_string()
-                }),
-            )
-        } else {
-            self.blocked_reason.clone()
-        };
-        let state = if blocked_reason.is_some() {
-            AlignmentState::Blocked
-        } else {
-            state
-        };
-
+        // R1: there is no halted state to override the topology-derived one.
+        // Every condition that used to force `Blocked` now resolves itself, so
+        // the state computed above is the state reported.
         let snapshot = AlignmentSnapshot {
             state,
             height,
@@ -878,7 +922,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             highest_known,
             progress,
             cycles_remaining,
-            blocked_reason: blocked_reason.clone(),
+            blocked_reason: None,
         };
 
         // 7. Detect state or height change and emit WS event.
@@ -896,9 +940,6 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 "progress": progress,
                 "cycles_remaining": cycles_remaining,
                 "previous_state": prev.state.label(),
-                // Carried on the event as well as the RPC so a client that is
-                // already connected learns *why* without a second round trip.
-                "blocked_reason": blocked_reason,
             }));
         }
     }
@@ -1786,7 +1827,6 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                         // Importing a block is proof the blocking condition is
                         // gone. Cleared here rather than in `reset_sync_idle`,
                         // which the blocking paths themselves call.
-                        self.blocked_reason = None;
 
                         // Update progress atomics.
                         let current = height;
@@ -1858,12 +1898,23 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                                  This is not retryable — the chain itself must be re-founded, or \
                                  this node pointed at a different peer."
                             );
-                            self.blocked_reason = Some(format!("Cannot join chain — {reason}"));
+                            // R2: this is a verdict about the PEER's chain, not
+                            // about us. Drop it as a sync source and carry on
+                            // with our own — a peer offering an unacceptable
+                            // foundation must never take this node down.
+                            self.drop_sync_source(&reason);
+                            // G4: carry the real reason, not a generic verdict.
+                            // A chain refused for a record fault must never be
+                            // presented as one founded by a single node.
                             self.broadcast_event(serde_json::json!({
-                                "event": "sync_blocked",
+                                "event": "sync_source_rejected",
                                 "height": height,
                                 "reason": reason,
-                                "message": "Cannot join chain — genesis is not properly witnessed",
+                                "under_witnessed": reason.contains("Dual-Witness Rule"),
+                                "message": format!(
+                                    "Not adopting this peer's chain ({reason}) — \
+                                     continuing on our own chain"
+                                ),
                             }));
                             self.reset_sync_idle();
                             return;
@@ -1876,16 +1927,19 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                                  to the seed used by this chain (`noble-tool genesis --seed \
                                  <SEED>` prints the resulting chain ID), then restart."
                             );
-                            self.blocked_reason = Some(
-                                "Sync blocked — no genesis block. Set [chain] genesis_seed \
-                                 in noble.toml and restart."
-                                    .to_string(),
-                            );
+                            // R3: re-enter the founding/fetch path instead of
+                            // halting. Genesis is servable over GetBlocks, so a
+                            // node without one asks its peers for it; with no
+                            // peers it keeps proposing a candidate under the
+                            // normal Dual-Witness rules. Never demand a config
+                            // edit and a restart.
+                            self.request_genesis_from_peers();
                             self.broadcast_event(serde_json::json!({
-                                "event": "sync_blocked",
+                                "event": "genesis_requested",
                                 "height": height,
-                                "reason": "no genesis block configured",
-                                "message": "Sync blocked — set [chain] genesis_seed and restart",
+                                "reason": "no genesis block yet",
+                                "message": "No genesis yet — requesting it from peers and \
+                                            continuing to participate in founding",
                             }));
                             self.reset_sync_idle();
                             return;
@@ -1952,6 +2006,14 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 }
             }
             let Ok(pid) = hex::decode(&entry.peer_id) else { continue };
+            // R2: a peer whose chain we refused is not a candidate source until
+            // its rejection ages out. Without this the refusal is inert —
+            // `drop_sync_source` would record it and selection would hand back
+            // the same peer on the very next tick, retrying a chain we have
+            // already judged unacceptable.
+            if self.is_rejected_sync_source(&pid) {
+                continue;
+            }
             if let Some(v) = entry.verified_height {
                 if v > our_height && best_verified.as_ref().is_none_or(|(_, bh)| v > *bh) {
                     best_verified = Some((pid.clone(), v));
@@ -2369,7 +2431,6 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                             self.reset_sync_idle();
                             self.sync_verify_retries = 0;
                             self.sync_start_height = 0;
-                            self.blocked_reason = None;
                             self.broadcast_event(serde_json::json!({
                                 "event": "integrity_repaired",
                                 "from_height": our_height,
@@ -2397,28 +2458,32 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 }
             }
 
-            // Unrepairable. Halt read-only rather than destroy: reads and RPC
-            // keep serving so an operator can diagnose, proposals are
-            // suppressed, and chain data + chain_id are left untouched. A
-            // deliberate wipe remains available via the TOTP-gated manual RPC.
-            self.integrity_failed.store(true, Ordering::Relaxed);
-            self.blocked_reason = Some(format!(
-                "Chain integrity failure at height {our_height} — node halted read-only, \
-                 chain data preserved. Operator action required."
-            ));
-            tracing::error!(
+            // R4: no intact prefix above genesis. Escalate the rewind instead
+            // of halting — genesis is the last anchor that cannot be wrong, so
+            // fall back to it and resync from the fork-choice winner.
+            //
+            // ACQUIRE-VERIFY-SWAP: `rollback_to` preflights, and nothing below
+            // genesis is ever discarded. The chain's identity survives, so a
+            // failed resync leaves us where we started rather than empty. The
+            // old code halted here precisely because an earlier version wiped
+            // before validating; rewinding to genesis destroys no foundation
+            // and so does not reopen that hole.
+            tracing::warn!(
                 task = "integrity",
-                "node HALTED read-only — chain data preserved, block proposals suppressed. \
-                 Operator action required (manual reset is available via authenticated RPC)."
+                "no intact prefix below height {our_height} — rewinding to genesis and \
+                 resyncing from peers; chain identity is preserved"
             );
+            self.rollback_to(noble_core::GENESIS_HEIGHT);
             self.broadcast_event(serde_json::json!({
-                "event": "integrity_failure",
+                "event": "integrity_recovery",
                 "height": our_height,
-                "proposals_suppressed": true,
-                "message": "Chain integrity failure — node halted read-only, operator action required",
+                "rewound_to": noble_core::GENESIS_HEIGHT,
+                "message": "Chain integrity failure — rewound to genesis and resyncing \
+                            automatically; no operator action needed",
             }));
             self.clear_pending_proposals();
             self.reset_sync_idle();
+            self.request_sync();
             return;
         }
 
@@ -2582,26 +2647,24 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         // The old automatic path also wiped BEFORE validating the adopted
         // chain (the M5 residual), so a node could destroy a good chain and
         // then fail to obtain the one it destroyed it for.
-        tracing::error!(
+        // R5: the refusal stands — we do not adopt another chain automatically.
+        // But refusing is not a failure of THIS node, and it must not disable
+        // it. Previously a peer sitting on a foreign chain took us down with
+        // it: we stopped proposing and reported a halt, having done nothing
+        // wrong. We simply stay on our own chain, fully operational.
+        tracing::warn!(
             task = "chain_adoption",
-            "REFUSING automatic cross-chain adoption of {:#010X} — {reason}. \
-             Adopting another chain would destroy this chain's genesis. Chain data \
-             is preserved and block proposals are suppressed; switching chains is an \
-             operator action (stop the node, wipe the data dir, restart).",
+            "not adopting chain {:#010X} — {reason}. Continuing on our own chain; \
+             switching chains remains a deliberate operator act, but this node keeps \
+             validating and proposing normally.",
             target_chain_id
         );
-        self.integrity_failed.store(true, Ordering::Relaxed);
-        self.blocked_reason = Some(format!(
-            "Refused automatic adoption of chain {target_chain_id:#010X} — operator action \
-             required. Chain data preserved."
-        ));
         self.broadcast_event(serde_json::json!({
-            "event": "adoption_refused",
+            "event": "adoption_declined",
             "target_chain_id": target_chain_id,
             "reason": reason,
-            "message": "Refused to adopt another chain — operator action required",
+            "message": "Not adopting another chain — continuing on our own",
         }));
-        self.clear_pending_proposals();
         self.reset_sync_idle();
     }
 
@@ -3210,11 +3273,44 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                         );
                     }
                     Ok(witnesses) => {
+                        // G4: this is the ONLY path entitled to call a chain
+                        // insufficiently witnessed, and it reports the count it
+                        // actually measured. Every other rejection reason says
+                        // what it really was, so a chain refused over an
+                        // encoding fault can never be mistaken — by an
+                        // operator or by fork choice — for one founded alone.
+                        tracing::warn!(
+                            task = "sync_import",
+                            measured_witnesses = witnesses,
+                            required_witnesses = required,
+                            genesis = %incoming,
+                            "peer's genesis is genuinely under-witnessed"
+                        );
                         return SyncImportResult::reject(
                             RejectKind::GenesisUnacceptable,
                             format!(
                                 "genesis witnessed by only {witnesses} distinct validator(s), \
                                  {required} required by the Dual-Witness Rule"
+                            ),
+                        )
+                    }
+                    // G3: a verification failure is not automatically a verdict
+                    // on the peer's chain. Only a genuine witness shortfall or
+                    // a forged/mismatched record condemns a foundation; a cycle
+                    // binding fault is a defect in the *record*, and treating
+                    // it as illegitimacy permanently refused properly-founded
+                    // chains and told the operator they had to be re-founded.
+                    Err(noble_consensus::history::WitnessError::WrongCycle {
+                        got,
+                        expected,
+                        ..
+                    }) => {
+                        return SyncImportResult::reject(
+                            RejectKind::GenesisWitnessMissing,
+                            format!(
+                                "genesis witness certificate has an inconsistent cycle binding \
+                                 (vote cycle {got}, certificate cycle {expected}) — re-requesting \
+                                 over the vote-carrying path; this is NOT a witness shortfall"
                             ),
                         )
                     }
@@ -3876,6 +3972,15 @@ mod tests {
     /// Build a signed witness certificate for `candidate` from `n` distinct
     /// validators, as a CBOR `BlockVotes` blob (what sync carries).
     fn witness_blob(candidate: Hash256, n: usize) -> Vec<u8> {
+        witness_blob_at_cycle(candidate, n, 0)
+    }
+
+    /// As [`witness_blob`], but for a genesis founded in `cycle`.
+    ///
+    /// The fixtures used to hard-code cycle 0 on both the votes and the
+    /// certificate, so the one shape that actually broke — founding that took
+    /// more than a single cycle — was never constructed and never tested.
+    fn witness_blob_at_cycle(candidate: Hash256, n: usize, cycle: u64) -> Vec<u8> {
         use noble_codec::NobleCbor;
         let mut votes = Vec::new();
         for _ in 0..n {
@@ -3883,12 +3988,12 @@ mod tests {
             let priv_key = noble_crypto::NoblePrivateKey::Secp256k1(sk);
             let pub_key = noble_crypto::NoblePublicKey::Secp256k1(pk);
             votes.push(
-                noble_consensus::PorVote::sign(0, candidate, &priv_key, pub_key)
+                noble_consensus::PorVote::sign(cycle, candidate, &priv_key, pub_key)
                     .expect("vote signs"),
             );
         }
         let bv = noble_consensus::BlockVotes {
-            cycle_number: 0,
+            cycle_number: cycle,
             voter_count: n,
             strength: "Strong".to_string(),
             r1_voters: vec![],
@@ -3897,7 +4002,7 @@ mod tests {
             dual_witness_required: true,
             dual_witness_met: true,
             certificate: Some(noble_consensus::history::WitnessCertificate {
-                cycle: 0,
+                cycle,
                 candidate_hash: candidate,
                 votes,
             }),
@@ -4085,6 +4190,116 @@ mod tests {
             }
             other => panic!("substituted genesis must be refused, got {other:?}"),
         }
+    }
+
+    /// R6/G1: a chain founded after several cycles must be joinable.
+    ///
+    /// Founding routinely takes more than one cycle — live logs show cycle 3
+    /// and cycle 13. The certificate used to be stamped cycle 0 regardless, so
+    /// such a chain could never prove its witnesses: every joining peer refused
+    /// it as under-witnessed and told the operator it had to be re-founded.
+    /// This is the exact case the fixtures never built.
+    #[test]
+    fn a_genesis_founded_after_many_cycles_is_accepted_by_a_joining_peer() {
+        let mut h = make_healing_manager();
+        let real = noble_test_utils::fixtures::test_genesis_block();
+        let real_hash = noble_test_utils::fixtures::test_genesis_hash();
+        let mut promised = [0u8; 32];
+        promised.copy_from_slice(real_hash.as_bytes());
+
+        h.sync_state = SyncState::Fetching {
+            peer: vec![7, 7, 7],
+            target: 2,
+            manifest: vec![ManifestEntry {
+                height: noble_core::GENESIS_HEIGHT,
+                hash: promised,
+                status: EntryStatus::Requested { at: 0 },
+            }],
+            cursor: 0,
+        };
+
+        let required = h.consensus.read().min_unique_voters();
+        let blob = witness_blob_at_cycle(real_hash, required, 13);
+        match h.try_sync_import(&real, Some(&blob)) {
+            SyncImportResult::Rejected { ref reason, kind } => panic!(
+                "a properly witnessed genesis founded at cycle 13 must be accepted, \
+                 got {kind:?}: {reason}"
+            ),
+            _ => {}
+        }
+    }
+
+    /// R6/G3: a cycle-binding fault is retryable, never a verdict on the chain.
+    #[test]
+    fn a_cycle_binding_fault_is_retryable_not_a_witness_verdict() {
+        use noble_codec::NobleCbor;
+        let mut h = make_healing_manager();
+        let real = noble_test_utils::fixtures::test_genesis_block();
+        let real_hash = noble_test_utils::fixtures::test_genesis_hash();
+        let mut promised = [0u8; 32];
+        promised.copy_from_slice(real_hash.as_bytes());
+
+        h.sync_state = SyncState::Fetching {
+            peer: vec![7, 7, 7],
+            target: 2,
+            manifest: vec![ManifestEntry {
+                height: noble_core::GENESIS_HEIGHT,
+                hash: promised,
+                status: EntryStatus::Requested { at: 0 },
+            }],
+            cursor: 0,
+        };
+
+        // Two genuine witnesses, but the certificate's cycle is far from the
+        // votes' — the legacy on-disk shape, and a record fault, not a fraud.
+        let required = h.consensus.read().min_unique_voters();
+        let mut bv = <noble_consensus::BlockVotes as NobleCbor>::from_cbor(
+            &witness_blob_at_cycle(real_hash, required, 13),
+        )
+        .expect("decodes");
+        if let Some(cert) = bv.certificate.as_mut() {
+            cert.cycle = 0;
+        }
+        let blob = bv.to_cbor().expect("encodes");
+
+        match h.try_sync_import(&real, Some(&blob)) {
+            SyncImportResult::Rejected { ref reason, kind } => {
+                assert_eq!(
+                    kind,
+                    RejectKind::GenesisWitnessMissing,
+                    "a record fault must be retryable, not a terminal verdict: {reason}"
+                );
+                assert!(
+                    !reason.contains("Dual-Witness Rule"),
+                    "must not be reported as a witness shortfall, got: {reason}"
+                );
+            }
+            other => panic!("expected a retryable rejection, got {other:?}"),
+        }
+    }
+
+    /// R2: refusing a peer's chain must drop that peer as a source, not the node.
+    #[test]
+    fn a_refused_peer_is_skipped_as_a_sync_source_but_the_node_keeps_running() {
+        let mut h = make_healing_manager();
+        h.sync_state = SyncState::Fetching {
+            peer: vec![1, 2, 3],
+            target: 5,
+            manifest: vec![],
+            cursor: 0,
+        };
+        h.drop_sync_source("genesis witnessed by only 1 distinct validator(s)");
+
+        assert!(
+            h.is_rejected_sync_source(&[1, 2, 3]),
+            "the refusal must actually be recorded, or selection re-picks the peer"
+        );
+        h.compute_alignment();
+        assert_ne!(
+            h.alignment().read().state.label(),
+            "Blocked",
+            "refusing a peer's chain must never halt this node"
+        );
     }
 
     #[test]
@@ -4321,31 +4536,27 @@ mod tests {
         );
     }
 
+    /// R6: the inverse of the test this replaces.
+    ///
+    /// Alignment used to be overridden by a halt flag that outranked every
+    /// topology-derived state. There is no such flag and no such state now: a
+    /// chain failure is resolved by protocol, so alignment always reports what
+    /// the node is actually doing.
     #[test]
-    fn integrity_halt_forces_blocked_and_outranks_the_topology_state() {
+    fn alignment_never_reports_a_halted_operator_gated_state() {
         let mut h = make_healing_manager();
 
-        // Baseline: no peers, height 0 — the topology says Isolated.
         h.compute_alignment();
-        let before = h.alignment().read().clone();
-        assert_ne!(before.state, AlignmentState::Blocked);
-        assert!(before.blocked_reason.is_none());
-
-        // The startup integrity check sets this shared flag on `Node`; healing
-        // must honour it even though it set no local reason of its own.
-        h.integrity_failed().store(true, Ordering::Relaxed);
-        h.compute_alignment();
-        let after = h.alignment().read().clone();
-        assert_eq!(
-            after.state,
-            AlignmentState::Blocked,
-            "a halted node must report Blocked regardless of peer topology"
+        let snap = h.alignment().read().clone();
+        assert_ne!(snap.state.label(), "Blocked");
+        assert!(
+            snap.blocked_reason.is_none(),
+            "no path may produce an operator-facing halt reason"
         );
         assert!(
-            after.blocked_reason.is_some(),
-            "Blocked must always carry an operator-facing reason"
+            matches!(snap.state.severity(), "zero" | "syncing" | "medium" | "high"),
+            "state must still classify for display"
         );
-        assert_eq!(after.state.severity(), "high");
     }
 
     #[test]
@@ -4515,7 +4726,6 @@ mod tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicBool::new(false)),
             ForkResolutionStrategy::LongestMostLegitimate,
             3,
         )
@@ -4860,14 +5070,17 @@ mod tests {
         });
         hm.evaluate_and_execute();
 
-        // Halted, with a reason an operator can act on.
+        // R5: the refusal stands, but it is not a failure of THIS node. We stay
+        // on our own chain and keep operating — a peer on a foreign chain must
+        // not be able to disable us by existing.
         assert!(
-            hm.integrity_failed.load(Ordering::Relaxed),
-            "refusing adoption must halt the node"
+            hm.alignment().read().blocked_reason.is_none(),
+            "refusing adoption must not halt this node"
         );
-        assert!(
-            hm.blocked_reason.is_some(),
-            "refusal must carry an operator-facing reason"
+        assert_ne!(
+            hm.alignment().read().state.label(),
+            "Blocked",
+            "declining a foreign chain is not an operator-gated failure"
         );
         // And nothing was destroyed: the chain's own weight is untouched.
         assert_eq!(
