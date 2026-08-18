@@ -75,6 +75,31 @@ class Noble < Formula
     (var/"noble/keystore").mkpath
     (var/"noble/logs").mkpath
 
+    # Linux: `brew services` installs a USER-scoped systemd unit, and user
+    # units are stopped when the login session ends unless lingering is on.
+    # keep_alive (Restart=always) only guards crashes — it cannot resurrect a
+    # unit systemd was told to stop. On 2026-08-18 an SSH session ending took
+    # the node down mid-consensus for 110 minutes. A validator must survive
+    # logout, so enable lingering here; if polkit refuses, tell the operator
+    # exactly what to run instead of failing silently.
+    if OS.linux?
+      user = ENV["USER"] || ENV["LOGNAME"]
+      linger = user ? `loginctl show-user #{user} --property=Linger 2>/dev/null`.strip : ""
+      unless linger == "Linger=yes"
+        if user && system("loginctl", "enable-linger", user,
+                          out: File::NULL, err: File::NULL)
+          puts "  Enabled systemd lingering for #{user} — the node now survives logout."
+        else
+          opoo <<~EOS
+            Could not enable systemd lingering. The noble service is a USER unit
+            and WILL STOP when your login session ends. Run once:
+              loginctl enable-linger #{user || "$USER"}
+            (or run the service system-wide: sudo brew services start noble)
+          EOS
+        end
+      end
+    end
+
     # Verify binary consistency — catches cross-compilation or
     # architecture-specific encoding bugs before the node starts.
     system bin/"noble-tool", "verify-wire"
@@ -229,6 +254,10 @@ class Noble < Formula
         8780  P2P         ↔ inbound+outbound (open to internet for full connectivity)
         8783  JSON-RPC    ← inbound only (HTTPS — clients/wallets connect here)
         8786  Faucet      ← inbound only (HTTPS — clients request tokens here)
+
+      Linux only — the service is a user-scoped systemd unit. It must survive
+      logout, so post-install enables lingering; verify with:
+        loginctl show-user $USER --property=Linger   # must say Linger=yes
 
       Paths:
         Config:    #{etc}/noble/noble.toml
