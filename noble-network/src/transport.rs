@@ -47,6 +47,12 @@ pub fn build_swarm(
     SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
         .with_tcp(
+            // NOTE (2026-08-18): libp2p-tcp 0.42 exposes no SO_KEEPALIVE
+            // option (only ttl/nodelay/listen_backlog), so an idle-direction
+            // socket on a dead route is never killed by the kernel on Linux.
+            // Dead-link detection therefore rests on the ping reaper
+            // (interval 30s + timeout 20s + MAX_PING_FAILURES) and the
+            // liveness watchdog — do not assume TCP itself will notice.
             tcp::Config::default().nodelay(true),
             noise::Config::new,
             || {

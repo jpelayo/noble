@@ -214,7 +214,12 @@ pub struct PeerState {
     /// All misbehavior categories recorded for this peer (in order).
     pub misbehavior_categories: Vec<BanCategory>,
     /// Clock offset in milliseconds (positive = peer ahead of us). `None` if not yet sampled.
-    pub clock_offset_ms: Option<i64>,
+    /// Last clock-offset sample and when it was taken.
+    ///
+    /// Timestamped so a sample cannot outlive the connection that produced it:
+    /// a link that dies without raising `PeerDisconnected` would otherwise keep
+    /// feeding the drift median forever. See [`CLOCK_OFFSET_SAMPLE_TTL`].
+    pub clock_offset_ms: Option<(i64, Instant)>,
     /// Timestamp of the last `update_chain_tip()` call (for stale-peer detection).
     pub last_chain_tip_at: Instant,
     /// Consecutive libp2p ping failures (reset to 0 on any ping success). Used
@@ -270,6 +275,13 @@ const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const RATE_LIMIT_WINDOW_MAX: u32 = 50;
 /// Duration of mass-ban cooldown in seconds (5 minutes).
 const MASS_BAN_COOLDOWN_SECS: u64 = 300;
+
+/// Offset samples older than this are excluded from the drift median.
+///
+/// A healthy peer re-announces every cycle (960s), so two missed cycles means
+/// the sample no longer describes a live connection. Bounding it stops a dead
+/// or half-open peer from holding a clock-drift verdict open indefinitely.
+const CLOCK_OFFSET_SAMPLE_TTL: Duration = Duration::from_secs(2 * 960);
 
 /// Outcome of a [`PeerManager::record_misbehavior`] call.
 #[derive(Debug)]
@@ -753,17 +765,23 @@ impl PeerManager {
     /// Update a peer's clock offset (milliseconds, positive = peer ahead).
     pub fn update_clock_offset(&mut self, peer_id: &PeerId, offset_ms: i64) {
         if let Some(state) = self.peers.get_mut(peer_id) {
-            state.clock_offset_ms = Some(offset_ms);
+            state.clock_offset_ms = Some((offset_ms, Instant::now()));
         }
     }
 
-    /// Compute the median clock offset across all peers that have data.
-    /// Returns `None` if fewer than 2 peers have clock offset samples.
+    /// Compute the median clock offset across all peers with a FRESH sample.
+    ///
+    /// Returns `None` if fewer than 2 peers have an unexpired sample. Staleness
+    /// matters as much as the count: an offset older than
+    /// [`CLOCK_OFFSET_SAMPLE_TTL`] describes a connection that can no longer be
+    /// demonstrated to exist, and a drift verdict must never rest on it.
     pub fn median_clock_offset_ms(&self) -> Option<i64> {
         let mut offsets: Vec<i64> = self
             .peers
             .values()
             .filter_map(|s| s.clock_offset_ms)
+            .filter(|(_, at)| at.elapsed() < CLOCK_OFFSET_SAMPLE_TTL)
+            .map(|(ms, _)| ms)
             .collect();
         if offsets.len() < 2 {
             return None;
@@ -1120,6 +1138,57 @@ mod tests {
         let (inb, outb) = pm.peer_count();
         assert_eq!(inb, 2);
         assert_eq!(outb, 1);
+    }
+
+    #[test]
+    fn stale_offset_samples_leave_the_drift_median() {
+        // A sample older than the TTL describes a connection that can no
+        // longer be shown to exist. Keeping it would let a dead or half-open
+        // peer hold a clock-drift verdict — and therefore a proposal pause —
+        // open indefinitely.
+        let mut pm = PeerManager::new(&test_config());
+        let (p1, p2) = (random_peer(), random_peer());
+        let _ = pm.on_connected(p1, Direction::Outbound);
+        let _ = pm.on_connected(p2, Direction::Outbound);
+        pm.update_clock_offset(&p1, 1_000);
+        pm.update_clock_offset(&p2, 3_000);
+        assert_eq!(
+            pm.median_clock_offset_ms(),
+            Some(2_000),
+            "two fresh samples produce a median"
+        );
+
+        // Age both samples past the TTL.
+        let stale = Instant::now() - (CLOCK_OFFSET_SAMPLE_TTL + Duration::from_secs(1));
+        for pid in [p1, p2] {
+            if let Some(st) = pm.peers.get_mut(&pid) {
+                if let Some((ms, _)) = st.clock_offset_ms {
+                    st.clock_offset_ms = Some((ms, stale));
+                }
+            }
+        }
+        assert_eq!(
+            pm.median_clock_offset_ms(),
+            None,
+            "expired samples must not sustain a drift verdict"
+        );
+    }
+
+    #[test]
+    fn a_single_peer_never_produces_a_drift_median() {
+        // Documents why the drift pause cannot engage on a two-node network:
+        // one peer is one sample, and the median requires at least two. Worth
+        // pinning — it is the difference between a real diagnosis and a
+        // plausible one.
+        let mut pm = PeerManager::new(&test_config());
+        let p = random_peer();
+        let _ = pm.on_connected(p, Direction::Outbound);
+        pm.update_clock_offset(&p, 999_000);
+        assert_eq!(
+            pm.median_clock_offset_ms(),
+            None,
+            "a lone peer's offset is never a median, however extreme"
+        );
     }
 
     #[test]

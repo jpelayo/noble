@@ -195,6 +195,23 @@ impl<T: ?Sized> TrackedRwLock<T> {
         TrackedWriteGuard { order: self.order, guard: self.inner.write() }
     }
 
+    /// Bounded read acquisition: give up after `timeout` instead of blocking.
+    ///
+    /// For callers that must DEGRADE rather than stall when the writer is busy
+    /// or wedged — the network service's serving callbacks run synchronously
+    /// inside its event loop, and an unbounded `read()` there lets one stuck
+    /// writer freeze all peer traffic (2026-08-17: both event loops froze for
+    /// the lifetime of a dying TCP connection; 11.5 h on the Linux node).
+    /// The acquisition is order-tracked exactly like `read()` when it succeeds.
+    pub fn try_read_for(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<TrackedReadGuard<'_, T>> {
+        let guard = self.inner.try_read_for(timeout)?;
+        acquire(self.order);
+        Some(TrackedReadGuard { order: self.order, guard })
+    }
+
     /// The lock-order rank this lock was tagged with.
     #[allow(dead_code)]
     pub fn order(&self) -> LockOrder {

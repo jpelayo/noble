@@ -174,7 +174,15 @@ impl NobleBehaviour {
         ));
 
         // --- Ping ---
-        let ping = ping::Behaviour::new(ping::Config::new().with_interval(Duration::from_secs(30)));
+        // Ping is the liveness probe that feeds the Layer-3 dead-peer reaper.
+        // The timeout is explicit (was: library default) — a dead link must be
+        // detected in interval+timeout (~50s), not at the kernel's TCP give-up,
+        // which on 2026-08-17 took 53 minutes on macOS and never on Linux.
+        let ping = ping::Behaviour::new(
+            ping::Config::new()
+                .with_interval(Duration::from_secs(30))
+                .with_timeout(Duration::from_secs(20)),
+        );
 
         // --- Kademlia DHT (GAP-H5) ---
         let local_peer_id = keypair.public().to_peer_id();

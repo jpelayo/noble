@@ -31,39 +31,67 @@ pub struct StorageBlockProvider<S: StorageEngine> {
     tx_count_memo: std::sync::Mutex<(u64, u64)>,
 }
 
+/// How long a serving callback will wait for the storage lock before degrading.
+///
+/// These callbacks run synchronously inside the network service event loop:
+/// an unbounded `read()` here lets one stuck writer freeze ALL peer traffic —
+/// on 2026-08-17 both event loops froze for the lifetime of a dying TCP
+/// connection (53 min on macOS, 11.5 h on Linux). Serving nothing for one
+/// request is recoverable (the peer retries); a frozen service loop is not.
+/// This judges lock AVAILABILITY only, never block content — acceptance
+/// policy stays at import, per the serving-path rule.
+const PROVIDER_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 impl<S: StorageEngine> StorageBlockProvider<S> {
     /// Create a new block provider wrapping the given storage.
     pub fn new(storage: Arc<TrackedRwLock<S>>) -> Self {
         Self { storage, tx_count_memo: std::sync::Mutex::new((0, 0)) }
+    }
+
+    /// Bounded storage read for the serving path. `None` = degrade this
+    /// request rather than stall the network loop.
+    fn storage_for_serving(&self) -> Option<noble_api::lock_order::TrackedReadGuard<'_, S>> {
+        let guard = self.storage.try_read_for(PROVIDER_LOCK_TIMEOUT);
+        if guard.is_none() {
+            tracing::warn!(
+                task = "serving",
+                "storage lock unavailable for {}ms — degrading this serving \
+                 request instead of stalling the network loop",
+                PROVIDER_LOCK_TIMEOUT.as_millis()
+            );
+        }
+        guard
     }
 }
 
 impl<S: StorageEngine + Send + Sync> BlockProvider for StorageBlockProvider<S> {
     fn get_block(&self, hash: &[u8; 32]) -> Option<Block> {
         let h = Hash256(*hash);
-        let storage = self.storage.read();
+        let storage = self.storage_for_serving()?;
         storage.get_block(&h).ok()
     }
 
     fn get_block_by_height(&self, height: u64) -> Option<Block> {
-        let storage = self.storage.read();
+        let storage = self.storage_for_serving()?;
         let hash = storage.get_block_hash_by_height(height).ok()?;
         storage.get_block(&hash).ok()
     }
 
     fn get_block_header(&self, hash: &[u8; 32]) -> Option<BlockHeader> {
         let h = Hash256(*hash);
-        let storage = self.storage.read();
+        let storage = self.storage_for_serving()?;
         storage.get_block_header(&h).ok()
     }
 
     fn get_block_hash_by_height(&self, height: u64) -> Option<[u8; 32]> {
-        let storage = self.storage.read();
+        let storage = self.storage_for_serving()?;
         storage.get_block_hash_by_height(height).ok().map(|h| *h.as_bytes())
     }
 
     fn chain_tip(&self) -> (u64, [u8; 32]) {
-        let storage = self.storage.read();
+        let Some(storage) = self.storage_for_serving() else {
+            return (0, [0; 32]);
+        };
         storage
             .get_chain_tip()
             .ok()
@@ -73,7 +101,9 @@ impl<S: StorageEngine + Send + Sync> BlockProvider for StorageBlockProvider<S> {
     }
 
     fn total_transactions(&self) -> u64 {
-        let storage = self.storage.read();
+        let Some(storage) = self.storage_for_serving() else {
+            return 0;
+        };
         let tip = match storage.get_chain_tip().ok().flatten() {
             Some(t) => t,
             None => return 0,
@@ -116,7 +146,7 @@ impl<S: StorageEngine + Send + Sync> BlockProvider for StorageBlockProvider<S> {
     }
 
     fn get_block_votes(&self, height: u64) -> Option<Vec<u8>> {
-        let storage = self.storage.read();
+        let storage = self.storage_for_serving()?;
         match storage.get_block_votes(height) {
             Ok(v) => v,
             Err(e) => {
@@ -159,8 +189,9 @@ impl<S: StorageEngine + Send + Sync> TxProvider for StorageTxProvider<S> {
                 return Some(entry.tx.clone());
             }
         }
-        // Fall back to committed storage.
-        let storage = self.storage.read();
+        // Fall back to committed storage — bounded, same rationale as the
+        // block provider: degrade the request, never stall the network loop.
+        let storage = self.storage.try_read_for(PROVIDER_LOCK_TIMEOUT)?;
         storage.get_transaction(&h).ok()
     }
 
@@ -174,7 +205,9 @@ impl<S: StorageEngine + Send + Sync> TxProvider for StorageTxProvider<S> {
                 return true;
             }
         }
-        let storage = self.storage.read();
+        let Some(storage) = self.storage.try_read_for(PROVIDER_LOCK_TIMEOUT) else {
+            return false;
+        };
         storage.has_transaction(&h).unwrap_or(false)
     }
 }
@@ -188,6 +221,39 @@ mod tests {
 
     fn test_mempool() -> Arc<TrackedMutex<Mempool>> {
         Arc::new(TrackedMutex::new(LockOrder::Mempool, Mempool::new(MempoolConfig::default())))
+    }
+
+    /// W2.3 regression: a held storage write lock must DEGRADE serving, not
+    /// stall it. Under the old bare `read()`, this test never returns — the
+    /// serving path blocks for as long as the writer holds the lock, which on
+    /// 2026-08-17 froze the whole network service loop for the lifetime of a
+    /// dying TCP connection.
+    #[test]
+    fn serving_degrades_instead_of_stalling_when_storage_is_write_locked() {
+        let storage = Arc::new(TrackedRwLock::new(LockOrder::Storage, MemoryStorage::new()));
+        let bp = StorageBlockProvider::new(storage.clone());
+
+        // Hold the write lock on another thread well past the serving timeout.
+        let hold = std::time::Duration::from_millis(1500);
+        let writer = std::thread::spawn(move || {
+            let _guard = storage.write();
+            std::thread::sleep(hold);
+        });
+
+        // Give the writer thread time to actually take the lock.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let start = std::time::Instant::now();
+        let block = bp.get_block(&[0u8; 32]);
+        let elapsed = start.elapsed();
+
+        assert!(block.is_none(), "degraded request serves nothing");
+        assert!(
+            elapsed < std::time::Duration::from_millis(1200),
+            "serving must give up at the bounded timeout, not wait out the \
+             writer (took {elapsed:?})"
+        );
+        writer.join().unwrap();
     }
 
     #[test]

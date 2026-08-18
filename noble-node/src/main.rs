@@ -26,6 +26,7 @@ mod setup;
 pub mod startup;
 mod status;
 pub mod trace;
+mod watchdog;
 
 use std::sync::Arc;
 

@@ -54,6 +54,14 @@ pub struct NetworkHandle {
     pub bound_port: u16,
     /// The stable PeerId of this node (loaded from or saved to `p2p_identity.key`).
     pub local_peer_id: PeerId,
+    /// Liveness heartbeat: unix seconds stamped at the top of every service
+    /// loop iteration. Watched by the node's watchdog — on 2026-08-17 this
+    /// loop froze for 53 minutes on a dying TCP connection with nothing
+    /// observing it.
+    pub loop_beat: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Last select arm entered, as a raw code the watchdog's `LoopArm` decodes:
+    /// 5 = swarm event, 6 = command. Keep in sync with `watchdog::LoopArm`.
+    pub loop_arm: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl NetworkHandle {
@@ -368,7 +376,19 @@ pub async fn start_network_with_bans(
     // signal at all. The supervisor observes completion, logs it at error
     // level, and emits a terminal event so the node can react instead of
     // quietly serving nothing.
+    // Liveness heartbeat for the watchdog (arm codes: 5 = swarm, 6 = command;
+    // decoded by noble-node's watchdog::LoopArm).
+    let loop_beat = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    ));
+    let loop_arm = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+
     let supervisor_event_tx = event_tx.clone();
+    let beat_for_loop = loop_beat.clone();
+    let arm_for_loop = loop_arm.clone();
     tokio::spawn(async move {
         let loop_handle = tokio::spawn(run_event_loop(
             swarm,
@@ -378,6 +398,8 @@ pub async fn start_network_with_bans(
             tx_provider,
             command_rx,
             event_tx,
+            beat_for_loop,
+            arm_for_loop,
         ));
 
         let reason = match loop_handle.await {
@@ -410,6 +432,8 @@ pub async fn start_network_with_bans(
         event_rx,
         bound_port,
         local_peer_id,
+        loop_beat,
+        loop_arm,
     })
 }
 
@@ -498,6 +522,8 @@ async fn run_event_loop(
     tx_provider: Arc<dyn TxProvider>,
     mut command_rx: mpsc::Receiver<NetworkCommand>,
     event_tx: mpsc::Sender<NetworkEvent>,
+    loop_beat: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    loop_arm: std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) {
     let mut maintenance_interval =
         tokio::time::interval(Duration::from_secs(MAINTENANCE_INTERVAL_SECS));
@@ -614,9 +640,21 @@ async fn run_event_loop(
     let mut manifest_peer: Option<PeerId> = None;
 
     loop {
+        // Watchdog heartbeat: one stamp per iteration. If any handler below
+        // wedges (2026-08-17: 53 min on macOS, 11.5 h on Linux, both on a
+        // dying TCP connection), the beat freezes here and the watchdog names
+        // the arm recorded below.
+        loop_beat.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         tokio::select! {
             // --- Swarm events ---
             event = swarm.select_next_some() => {
+                loop_arm.store(5, std::sync::atomic::Ordering::Relaxed); // LoopArm::SwarmEvent
                 handle_swarm_event(
                     event,
                     &mut swarm,
@@ -649,6 +687,7 @@ async fn run_event_loop(
 
             // --- Commands from the node ---
             Some(cmd) = command_rx.recv() => {
+                loop_arm.store(6, std::sync::atomic::Ordering::Relaxed); // LoopArm::Command
                 // ClearGossipCaches is handled here (not in handle_command)
                 // because seen caches are local to the event loop scope.
                 // K3-13: mark locally published txs as seen BEFORE the announce

@@ -222,6 +222,30 @@ fn advertised_suppression_expired(
     }
 }
 
+/// S49: decide the clock-drift proposal pause from live peer evidence.
+///
+/// Pure so the rule can be tested directly — like
+/// [`advertised_suppression_expired`], it decides whether a node is allowed to
+/// produce blocks, which is the difference between a chain that keeps growing
+/// and one that silently stops.
+///
+/// `None` means there is no live peer evidence (no peers, or every offset
+/// sample has aged out) and therefore **no drift verdict to enforce** — so the
+/// node is not paused. The previous control flow only ever assigned the flag
+/// *inside* `if let Some(..)`, so a pause set from one bad sample survived the
+/// disappearance of the peer that justified it. On 2026-08-17 that muted a
+/// partitioned node for 37 consecutive cycles while its peer, unpaused, grew a
+/// rival chain alone; the silence ended only when the link came back.
+///
+/// A wrong clock is still fully protected against: the threshold is unchanged,
+/// and any live sample beyond it re-pauses on the very next refresh.
+fn clock_drift_pause(median_ms: Option<i64>) -> bool {
+    match median_ms {
+        Some(ms) => ms.unsigned_abs() / 1000 > noble_core::CLOCK_DRIFT_CRITICAL_SECS,
+        None => false,
+    }
+}
+
 impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     /// Initialize a node with the given storage backend.
     ///
@@ -1028,7 +1052,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         }
 
         // S49: Clock drift watchdog.
-        if let Some(offset_ms) = self.network_stats.read().median_clock_offset_ms {
+        //
+        // C2: with no peers connected there is no live evidence, so the cached
+        // median must not survive. Full isolation emits no PeerChainTipUpdated
+        // events at all, so the event path alone can never clear this — the
+        // stale value would otherwise keep re-deciding the pause forever.
+        if peer_count == 0 {
+            self.network_stats.write().median_clock_offset_ms = None;
+        }
+
+        let median = self.network_stats.read().median_clock_offset_ms;
+        if let Some(offset_ms) = median {
             m.clock_drift_seconds.set(offset_ms as f64 / 1000.0);
             let abs_drift = offset_ms.unsigned_abs() / 1000;
             if abs_drift > noble_core::CLOCK_DRIFT_CRITICAL_SECS {
@@ -1038,8 +1072,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "CRITICAL: Node clock drift exceeds {}s — block proposals suppressed",
                     noble_core::CLOCK_DRIFT_CRITICAL_SECS,
                 );
-                self.clock_drift_paused
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
             } else if abs_drift > noble_core::CLOCK_DRIFT_WARNING_SECS {
                 tracing::warn!(
                     task = "clock_drift",
@@ -1047,11 +1079,31 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "WARNING: Node clock drift exceeds {}s",
                     noble_core::CLOCK_DRIFT_WARNING_SECS,
                 );
-                self.clock_drift_paused
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-            } else {
-                self.clock_drift_paused
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        } else {
+            m.clock_drift_seconds.set(0.0);
+        }
+
+        // C1: evaluated on EVERY refresh, not only when a median exists. The
+        // verdict may never outlive the evidence that produced it.
+        let paused = clock_drift_pause(median);
+        let was_paused = self
+            .clock_drift_paused
+            .swap(paused, std::sync::atomic::Ordering::Relaxed);
+        if was_paused && !paused {
+            // Releasing silently is a Discipline-5 violation: the operator saw
+            // "proposals suppressed" and must be told when that ends, and why.
+            match median {
+                Some(ms) => tracing::info!(
+                    task = "clock_drift",
+                    drift_secs = ms.unsigned_abs() / 1000,
+                    "clock-drift pause released — drift back within threshold, proposals resume"
+                ),
+                None => tracing::info!(
+                    task = "clock_drift",
+                    "clock-drift pause released — no live peer evidence for a drift verdict, \
+                     proposals resume"
+                ),
             }
         }
     }
@@ -2889,11 +2941,29 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             tracing::info!(task = "faucet_probe", "initial faucet probe triggered on startup");
         }
 
+        // --- Liveness watchdog (W1) ---
+        // Two heartbeats: this loop's own, and the network service loop's
+        // (exported on the handle). The watchdog owns nothing but the atomics,
+        // so a frozen loop cannot freeze its observer. On 2026-08-17 both
+        // loops wedged on a dying TCP connection — 53 min here, 11.5 h on the
+        // peer — with nothing watching.
+        let node_hb = crate::watchdog::Heartbeat::new();
+        let net_hb = crate::watchdog::Heartbeat::from_parts(
+            network.loop_beat.clone(),
+            network.loop_arm.clone(),
+        );
+        crate::watchdog::spawn(
+            vec![("node_loop", node_hb.clone()), ("network_loop", net_hb)],
+            cycle_phase_tx.clone(),
+        );
+
         // --- Main event loop ---
         loop {
+            node_hb.tick();
             tokio::select! {
                 // Network events
                 event = network.recv_event() => {
+                    node_hb.enter(crate::watchdog::LoopArm::NetworkEvent);
                     match event {
                         Some(net_event) => {
                             let is_peer_connected = matches!(net_event, NetworkEvent::PeerConnected { .. });
@@ -2940,6 +3010,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
                 // Consensus tick
                 _ = tick_interval.tick() => {
+                    node_hb.enter(crate::watchdog::LoopArm::CycleTick);
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -3050,6 +3121,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
                 // Periodic NodeAnnounce re-broadcast (every 16 min)
                 _ = announce_interval.tick() => {
+                    node_hb.enter(crate::watchdog::LoopArm::AnnounceTimer);
                     if initial_announce_sent {
                         self.publish_node_announce(&shared_identity, &network_cmd, &cycle_phase_tx);
                     }
@@ -3058,6 +3130,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // Delayed re-announce: 3s after PeerConnected, re-publish to survive
                 // gossipsub mesh formation race.
                 _ = &mut announce_delay, if announce_delay_armed => {
+                    node_hb.enter(crate::watchdog::LoopArm::AnnounceTimer);
                     self.publish_node_announce(&shared_identity, &network_cmd, &cycle_phase_tx);
                     announce_delay_armed = false;
                 }
@@ -3065,6 +3138,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // Stale-peer sync fallback — send GetStatus only to peers whose
                 // chain_tip hasn't been refreshed via gossip in 120s.
                 _ = peer_status_interval.tick() => {
+                    node_hb.enter(crate::watchdog::LoopArm::OtherTimer);
                     let peer_count = self.network_stats.read().peer_count;
                     if peer_count > 0 {
                         if let Err(e) = network_cmd.try_send(NetworkCommand::RequestStaleSync { threshold_secs: 120 }) {
@@ -3076,6 +3150,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // Auto-reconnect: redial when connectivity is low.
                 // Threshold: fewer peers than seed count (minimum 1).
                 _ = reconnect_interval.tick() => {
+                    node_hb.enter(crate::watchdog::LoopArm::OtherTimer);
                     let current_peers = {
                         let stats = self.network_stats.read();
                         stats.peer_count
@@ -4018,9 +4093,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     tracing::debug!(task = "broadcast", "chain_tip_updated event dropped (no subscribers): {e}");
                 }
                 // S49: Update network-level clock offset.
-                if median_clock_offset_ms.is_some() {
-                    self.network_stats.write().median_clock_offset_ms = *median_clock_offset_ms;
-                }
+                //
+                // C2: store the reported value VERBATIM, including `None`. The
+                // guard here used to keep the last non-empty median alive after
+                // every offset sample had aged out, so a drift pause could be
+                // re-decided forever from evidence that no longer existed.
+                self.network_stats.write().median_clock_offset_ms = *median_clock_offset_ms;
                 // ── Healing: sync initiation, integrity probe, sync completion ──
                 self.healing.on_peer_chain_tip_updated(peer_id, *height);
                 let our_height = self.consensus.read().chain_tip().0;
@@ -6084,6 +6162,37 @@ mod tests {
     use super::*;
     use noble_consensus::ConsensusStateMachine;
     use noble_crypto::NobleSigner;
+
+    #[test]
+    fn clock_drift_pause_releases_when_its_evidence_disappears() {
+        // The verdict must not outlive the evidence. A pause set from a live
+        // sample must clear the moment there is no median to justify it —
+        // otherwise a node that loses its peers stays muted forever, unable to
+        // extend its own chain, while an unpaused peer grows a rival one.
+        assert!(
+            clock_drift_pause(Some(-180_000)),
+            "a live sample beyond the critical threshold must pause"
+        );
+        assert!(
+            !clock_drift_pause(None),
+            "no evidence means no drift verdict — the node must be free to propose"
+        );
+    }
+
+    #[test]
+    fn clock_drift_thresholds_are_unchanged() {
+        // The protection itself is untouched: only the LIFETIME of the verdict
+        // changed. Anything past the critical threshold still pauses, in
+        // either direction, and anything inside it does not.
+        let crit = noble_core::CLOCK_DRIFT_CRITICAL_SECS as i64 * 1000;
+        assert!(!clock_drift_pause(Some(0)));
+        assert!(!clock_drift_pause(Some(crit)), "exactly at threshold is not over it");
+        assert!(clock_drift_pause(Some(crit + 1000)));
+        assert!(
+            clock_drift_pause(Some(-crit - 1000)),
+            "drift is symmetric — behind is as bad as ahead"
+        );
+    }
 
     #[test]
     fn delivered_but_rejected_blocks_never_lift_proposal_suppression() {
