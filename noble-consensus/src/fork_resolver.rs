@@ -7,6 +7,8 @@
 //! calls `evaluate()` / `evaluate_cross_chain()` directly each tick,
 //! acting on the returned decisions inline.
 
+use std::cmp::Reverse;
+
 use noble_crypto::Hash256;
 use serde::{Deserialize, Serialize};
 
@@ -17,18 +19,90 @@ pub enum ForkResolutionStrategy {
     Manual,
     /// Resolve when >66% of peers are on a different fork.
     PeerSupermajority,
-    /// Resolve using height as primary factor, chain owner edge as secondary,
-    /// and decay-weighted vote legitimacy as tiebreaker for cross-chain.
-    /// The chain owner (block 1 proposer) gets a virtual height bonus of
-    /// `CHAIN_OWNER_EDGE_BLOCKS`, making their fork win at equal height
-    /// and resist switching when slightly behind.
+    /// Resolve by verified legitimacy first, then length.
+    ///
+    /// Same-chain forks are ranked by [`SegmentLegitimacy`]: a segment with any
+    /// under-witnessed block is Tier 0 and is never adopted while a witnessed
+    /// alternative exists; witnessed segments are graded ([`Grade`]) and only
+    /// among equal grades does height decide. Cross-chain adoption still uses
+    /// decay-weighted vote weight as its tiebreaker.
     LongestMostLegitimate,
 }
 
-/// Chain owner (block 1 validator) edge in virtual blocks.
-/// The owner's chain is treated as this many blocks taller in fork evaluation.
-/// Protocol constant — not configurable via TOML.
+/// Chain owner (block 1 validator) edge.
+///
+/// Historically a virtual +5 in height, which let the owner's fork win while
+/// *shorter* — and therefore let an owner that minted alone out-rank a
+/// witnessed chain. Ownership is now a **tiebreak** among otherwise equal
+/// forks (see `Grade` ordering); this constant is retained for API
+/// compatibility and no longer contributes to any height comparison.
 pub const CHAIN_OWNER_EDGE_BLOCKS: u64 = 5;
+
+// ── Legitimacy gradation ─────────────────────────────────────────────────────
+
+/// Grade of a fully-witnessed segment (every block has ≥ `min_unique_voters`
+/// verified witnesses). Derived `Ord` is lexicographic in field order, which
+/// *is* the rule: a chain is only as legitimate as its weakest block, so
+/// minimums rank before sums and sums before length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
+pub struct Grade {
+    /// `min_b w(b)` — witnesses on the least-witnessed block.
+    pub weakest: u64,
+    /// `min_b r1(b)` — round-1 (independent) witnesses on the weakest block.
+    pub weakest_r1: u64,
+    /// Distinct validator keys that witnessed anywhere in the segment.
+    pub coverage: u64,
+    /// `Σ_b w(b)` — total witness support; length re-enters here, weighted.
+    pub total: u64,
+}
+
+/// Grade of a self-voted segment, used only when every candidate is Tier 0.
+/// Witnesses cannot separate solo runs, so the unit is **participation** —
+/// who took part in each block in any role (witness or proposer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
+pub struct SoloGrade {
+    /// Distinct validators participating anywhere in the segment.
+    pub variety: u64,
+    /// `⌊1000 · Σ_b |P(b)| / |S|⌋` — average participants per block.
+    pub density_x1000: u64,
+    /// Blocks inside the segment that were fully witnessed.
+    pub witnessed_blocks: u64,
+    /// `min_k |{b : k ∈ P(b)}|` — the least-participating key's block count.
+    pub balance: u64,
+    /// `Σ_b |P(b)|` — total participation.
+    pub total: u64,
+}
+
+/// Verified legitimacy of a fork's segment above the common ancestor.
+///
+/// Computed from `WitnessCertificate`s that the evaluating node has fetched
+/// and verified itself — never from anything a peer announces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SegmentLegitimacy {
+    /// Every block in the segment is witnessed. Tier 1.
+    Witnessed(Grade),
+    /// At least one block in the segment has fewer than `min_unique_voters`
+    /// verified witnesses (or none provable). Tier 0 — legitimacy zero against
+    /// any witnessed alternative; graded among its own kind.
+    SelfVoted { first_solo: u64, grade: SoloGrade },
+    /// The fork's tip *is* the common ancestor: it holds the shared witnessed
+    /// prefix and nothing above it. Counts as a witnessed alternative.
+    NotContesting,
+    /// Not yet assessed. Never adoptable until it is; bounded lifetime.
+    Unknown,
+}
+
+impl SegmentLegitimacy {
+    /// Stable string for RPC / GUI / events.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Witnessed(_) => "witnessed",
+            Self::SelfVoted { .. } => "self_voted",
+            Self::NotContesting => "not_contesting",
+            Self::Unknown => "unknown",
+        }
+    }
+}
 
 /// Fork info fed from node.rs (same data as `getDetectedForks` RPC).
 #[derive(Debug, Clone)]
@@ -39,6 +113,12 @@ pub struct ForkInfo {
     pub is_local: bool,
     /// Whether the chain owner (block 1's validator) is on this fork.
     pub has_chain_owner: bool,
+    /// Verified legitimacy of this fork's segment above the common ancestor.
+    pub legitimacy: SegmentLegitimacy,
+    /// Local fork only: highest height `h` such that every block in
+    /// `(ancestor, h]` is witnessed — where a self-voted local segment is
+    /// abandoned to. Ignored for remote forks.
+    pub witnessed_prefix_end: u64,
 }
 
 /// Cross-chain fork info derived from `discovered_blockchains`.
@@ -64,6 +144,21 @@ pub enum ForkDecision {
     Resolve {
         target_hash: Hash256,
         target_height: u64,
+        reason: String,
+    },
+    /// The dominant rival's legitimacy is unknown: fetch heights
+    /// `(from_height, target_height]` with their vote witnesses and decide
+    /// next tick. Nothing is adopted on an unassessed chain.
+    Assess {
+        target_hash: Hash256,
+        target_height: u64,
+        from_height: u64,
+    },
+    /// Our own segment is self-voted and a peer holds the witnessed prefix we
+    /// share: roll back to `to_height`, adopt nothing, resume consensus.
+    AbandonSelfVoted {
+        to_height: u64,
+        first_solo: u64,
         reason: String,
     },
 }
@@ -109,6 +204,14 @@ pub fn decay_vote_weight(old_weight: u64, new_votes: u64) -> u64 {
         None => old_weight / VOTE_DECAY_FACTOR_DENOM * VOTE_DECAY_FACTOR_NUM,
     };
     decayed.saturating_add(new_votes.saturating_mul(1000))
+}
+
+/// Grade of a witnessed fork; `Grade::default()` (all zeros) for anything else.
+fn grade_of(f: &ForkInfo) -> Grade {
+    match f.legitimacy {
+        SegmentLegitimacy::Witnessed(g) => g,
+        _ => Grade::default(),
+    }
 }
 
 /// Pure fork resolution state machine.
@@ -167,6 +270,231 @@ impl ForkResolver {
             return ForkDecision::NoAction;
         }
 
+        let local = forks.iter().find(|f| f.is_local);
+        let local_leg = local.map(|f| f.legitimacy).unwrap_or(SegmentLegitimacy::Unknown);
+        let prefix_end = local.map(|f| f.witnessed_prefix_end).unwrap_or(local_height);
+        let rivals: Vec<&ForkInfo> = forks.iter().filter(|f| !f.is_local).collect();
+        if rivals.is_empty() {
+            self.reset_tracking();
+            return ForkDecision::NoAction;
+        }
+
+        // ── Legitimacy hierarchy — decided BEFORE any height logic ──
+        //
+        // A self-voted segment has legitimacy zero against anything witnessed.
+        // It is never adopted while a witnessed alternative exists, and its
+        // owner must abandon it. Among only self-voted segments, participation
+        // from varied peers decides. Length enters only inside a tier.
+        if let SegmentLegitimacy::SelfVoted { first_solo, grade } = local_leg {
+            let local_info = local.expect("local fork present when legitimacy is known");
+            return self.evaluate_self_voted_local(
+                local_info, prefix_end, first_solo, grade, &rivals, local_tip_hash,
+            );
+        }
+
+        // Local is witnessed (or holds only the shared prefix). Self-voted rivals
+        // are never adoptable. Unknown rivals must be assessed before anything.
+        let local_grade = match local_leg {
+            SegmentLegitimacy::Witnessed(g) => g,
+            _ => Grade::default(),
+        };
+        let mut witnessed: Vec<&ForkInfo> = Vec::new();
+        let mut unknown: Option<&ForkInfo> = None;
+        for r in &rivals {
+            match r.legitimacy {
+                SegmentLegitimacy::Witnessed(_) => witnessed.push(r),
+                SegmentLegitimacy::Unknown => {
+                    let better = unknown
+                        .map(|u| (r.peer_count, r.height) > (u.peer_count, u.height))
+                        .unwrap_or(true);
+                    if better { unknown = Some(r); }
+                }
+                // Legitimacy zero — never adopted. Behind-us-on-our-chain — nothing to adopt.
+                SegmentLegitimacy::SelfVoted { .. } | SegmentLegitimacy::NotContesting => {}
+            }
+        }
+        if witnessed.is_empty() {
+            // Only an unassessed rival that is actually ahead is worth fetching.
+            if let Some(u) = unknown {
+                if u.height > local_height {
+                    return ForkDecision::Assess {
+                        target_hash: u.tip_hash,
+                        target_height: u.height,
+                        from_height: prefix_end.min(local_height),
+                    };
+                }
+            }
+            self.reset_tracking();
+            return ForkDecision::NoAction;
+        }
+
+        // Among witnessed rivals, grade decides first.
+        let best = *witnessed
+            .iter()
+            .max_by_key(|f| (grade_of(f), f.height, f.has_chain_owner, f.peer_count, Reverse(f.tip_hash.0)))
+            .expect("non-empty");
+        let best_grade = grade_of(best);
+        if best_grade > local_grade {
+            // Higher legitimacy wins regardless of length — after dwell, never past finality.
+            if best.height <= self.finalized_height {
+                self.reset_tracking();
+                return ForkDecision::NoAction;
+            }
+            if !self.dwell_expired(best.height) {
+                return self.pending();
+            }
+            self.reset_tracking();
+            return ForkDecision::Resolve {
+                target_hash: best.tip_hash,
+                target_height: best.height,
+                reason: format!(
+                    "legitimacy: rival segment grade {best_grade:?} outranks local {local_grade:?} \
+                     (heights: local={local_height}, rival={})",
+                    best.height
+                ),
+            };
+        }
+        if best_grade < local_grade {
+            // Every witnessed rival is less legitimate than we are.
+            self.reset_tracking();
+            return ForkDecision::NoAction;
+        }
+
+        // Equal grade: the existing rules decide (height, then owner as a
+        // tiebreak, then peers, then hash). Only equally-graded rivals compete.
+        let equal: Vec<ForkInfo> = forks
+            .iter()
+            .filter(|f| f.is_local || (matches!(f.legitimacy, SegmentLegitimacy::Witnessed(g) if g == local_grade)))
+            .cloned()
+            .collect();
+        self.evaluate_equal_grade(local_height, &equal, total_peers, local_tip_hash)
+    }
+
+    /// Step 4 for a self-voted local segment: we never keep it against anything
+    /// witnessed, and among solo runs the better-participated one survives.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_self_voted_local(
+        &mut self,
+        local: &ForkInfo,
+        prefix_end: u64,
+        first_solo: u64,
+        my_grade: SoloGrade,
+        rivals: &[&ForkInfo],
+        local_tip_hash: Hash256,
+    ) -> ForkDecision {
+        // 1. A witnessed rival exists → abandon ours and adopt it, even if shorter.
+        if let Some(best) = rivals
+            .iter()
+            .filter(|f| matches!(f.legitimacy, SegmentLegitimacy::Witnessed(_)))
+            .max_by_key(|f| (grade_of(f), f.height, f.has_chain_owner, f.peer_count, Reverse(f.tip_hash.0)))
+        {
+            if !self.dwell_expired(best.height) {
+                return self.pending();
+            }
+            self.reset_tracking();
+            return ForkDecision::Resolve {
+                target_hash: best.tip_hash,
+                target_height: best.height,
+                reason: format!(
+                    "local segment is self-voted from height {first_solo} (legitimacy 0) — \
+                     yielding to witnessed rival at height {}",
+                    best.height
+                ),
+            };
+        }
+        // 2. A peer sits on the witnessed prefix we share → abandon to it, adopt nothing.
+        if rivals.iter().any(|f| f.legitimacy == SegmentLegitimacy::NotContesting) {
+            if !self.dwell_expired(prefix_end) {
+                return self.pending();
+            }
+            self.reset_tracking();
+            return ForkDecision::AbandonSelfVoted {
+                to_height: prefix_end,
+                first_solo,
+                reason: format!(
+                    "local segment is self-voted from height {first_solo}; a peer holds the \
+                     witnessed prefix at {prefix_end} — abandoning solo blocks"
+                ),
+            };
+        }
+        // 3. Unknown rivals must be assessed before we decide anything.
+        if let Some(u) = rivals
+            .iter()
+            .filter(|f| f.legitimacy == SegmentLegitimacy::Unknown)
+            .max_by_key(|f| (f.peer_count, f.height))
+        {
+            return ForkDecision::Assess {
+                target_hash: u.tip_hash,
+                target_height: u.height,
+                from_height: prefix_end,
+            };
+        }
+        // 4. Only solo runs on offer: participation grade decides; the loser yields.
+        let solo_key = |f: &ForkInfo, g: SoloGrade| {
+            (g, f.height, f.has_chain_owner, f.peer_count, Reverse(f.tip_hash.0))
+        };
+        let mine = solo_key(local, my_grade);
+        let _ = local_tip_hash;
+        let best = rivals
+            .iter()
+            .filter_map(|f| match f.legitimacy {
+                SegmentLegitimacy::SelfVoted { grade, .. } => Some((*f, solo_key(f, grade))),
+                _ => None,
+            })
+            .max_by_key(|(_, k)| *k);
+        match best {
+            Some((rival, key)) if key > mine => {
+                if !self.dwell_expired(rival.height) {
+                    return self.pending();
+                }
+                self.reset_tracking();
+                ForkDecision::Resolve {
+                    target_hash: rival.tip_hash,
+                    target_height: rival.height,
+                    reason: format!(
+                        "only self-voted chains present: rival participation grade {:?} outranks \
+                         local {:?} — yielding",
+                        key.0, my_grade
+                    ),
+                }
+            }
+            _ => {
+                // We are the better-participated solo run (or alone). The rival yields.
+                self.reset_tracking();
+                ForkDecision::NoAction
+            }
+        }
+    }
+
+    /// Advance the dwell counter for a tracked rival height; true once the
+    /// fork has persisted for `min_fork_duration` evaluations.
+    fn dwell_expired(&mut self, tracked_height: u64) -> bool {
+        match self.tracked_fork_height {
+            Some(prev) if tracked_height < prev => self.fork_dwell_counter = 0,
+            None => self.fork_dwell_counter = 0,
+            _ => {}
+        }
+        self.tracked_fork_height = Some(tracked_height);
+        self.fork_dwell_counter += 1;
+        self.fork_dwell_counter >= self.min_fork_duration
+    }
+
+    fn pending(&self) -> ForkDecision {
+        ForkDecision::Pending {
+            cycles_remaining: self.min_fork_duration.saturating_sub(self.fork_dwell_counter),
+        }
+    }
+
+    /// The pre-hierarchy rules, applied only among forks of EQUAL grade:
+    /// height threshold, dwell, same-height deadlock with the chain owner as
+    /// tiebreak, peer count, lower hash.
+    fn evaluate_equal_grade(
+        &mut self,
+        local_height: u64,
+        forks: &[ForkInfo],
+        total_peers: usize,
+        local_tip_hash: Hash256,
+    ) -> ForkDecision {
         // Find the dominant non-local fork (highest peer_count, then height).
         let dominant = forks
             .iter()
@@ -188,13 +516,12 @@ impl ForkResolver {
                 dominant.peer_count * 3 > total_peers * 2
             }
             ForkResolutionStrategy::LongestMostLegitimate => {
-                // Virtual height model: chain owner gets CHAIN_OWNER_EDGE_BLOCKS bonus.
-                let local_has_owner = forks.iter()
-                    .any(|f| f.is_local && f.has_chain_owner);
-                let dominant_effective = dominant.height
-                    .saturating_add(if dominant.has_chain_owner { CHAIN_OWNER_EDGE_BLOCKS } else { 0 });
-                let local_effective = local_height
-                    .saturating_add(if local_has_owner { CHAIN_OWNER_EDGE_BLOCKS } else { 0 });
+                // F2: the chain-owner edge is no longer a virtual +5 in height.
+                // Legitimacy was decided before reaching here; among equally
+                // graded forks height decides, and ownership breaks ties only
+                // at equal height (same-height deadlock below).
+                let dominant_effective = dominant.height;
+                let local_effective = local_height;
 
                 // Bootstrap fork: when both chains are very short (< EARLY_CHAIN_LIMIT),
                 // any lead is enough to trigger resolution after the dwell delay.
@@ -312,18 +639,16 @@ impl ForkResolver {
             ForkResolutionStrategy::LongestMostLegitimate => {
                 let local_has_owner = forks.iter()
                     .any(|f| f.is_local && f.has_chain_owner);
-                let dominant_effective = dominant.height
-                    .saturating_add(if dominant.has_chain_owner { CHAIN_OWNER_EDGE_BLOCKS } else { 0 });
-                let local_effective = local_height
-                    .saturating_add(if local_has_owner { CHAIN_OWNER_EDGE_BLOCKS } else { 0 });
+                let dominant_effective = dominant.height;
+                let local_effective = local_height;
                 let owner_note = match (local_has_owner, dominant.has_chain_owner) {
                     (false, true) => " (chain owner on dominant fork)",
                     (true, false) => " (chain owner on local fork)",
                     _ => "",
                 };
                 format!(
-                    "fork resolution{}: dominant effective={} vs local effective={} (actual: local={}, fork={})",
-                    owner_note, dominant_effective, local_effective, local_height, dominant.height
+                    "fork resolution{} (equal legitimacy grade): dominant height={} vs local height={}",
+                    owner_note, dominant_effective, local_effective
                 )
             }
             ForkResolutionStrategy::Manual => unreachable!(),
@@ -535,6 +860,8 @@ mod tests {
             peer_count: 1,
             is_local: true,
             has_chain_owner: false,
+            legitimacy: SegmentLegitimacy::Witnessed(Grade::default()),
+            witnessed_prefix_end: height,
         }
     }
 
@@ -545,6 +872,8 @@ mod tests {
             peer_count: 1,
             is_local: true,
             has_chain_owner: true,
+            legitimacy: SegmentLegitimacy::Witnessed(Grade::default()),
+            witnessed_prefix_end: height,
         }
     }
 
@@ -555,6 +884,8 @@ mod tests {
             peer_count,
             is_local: false,
             has_chain_owner: false,
+            legitimacy: SegmentLegitimacy::Witnessed(Grade::default()),
+            witnessed_prefix_end: 0,
         }
     }
 
@@ -565,6 +896,8 @@ mod tests {
             peer_count,
             is_local: false,
             has_chain_owner: true,
+            legitimacy: SegmentLegitimacy::Witnessed(Grade::default()),
+            witnessed_prefix_end: 0,
         }
     }
 
@@ -934,80 +1267,57 @@ mod tests {
         assert_eq!(fr2.evaluate(15, &forks2, 3, hash(0)), ForkDecision::NoAction);
     }
 
-    // ── Chain owner tiebreaker tests ──
+    // ── Chain owner: a TIEBREAK, never a height edge (F2) ──
 
     #[test]
     fn chain_owner_equal_height_switch() {
-        // Equal height (10), owner on dominant fork → should switch.
-        // dominant effective = 10+5=15, local effective = 10+0=10, threshold = 10+3=13
-        // 15 > 13 → switch
+        // Equal height, equal grade, owner on the dominant fork: the
+        // same-height deadlock breaks toward the owner.
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks = vec![local_fork(10), remote_fork_owner(1, 10, 2)];
-        let result = fr.evaluate(10, &forks, 3, hash(0));
-        match result {
+        match fr.evaluate(10, &forks, 3, hash(0)) {
             ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 10),
             other => panic!("expected Resolve, got {:?}", other),
         }
     }
 
     #[test]
-    fn chain_owner_behind_1_block_switch() {
-        // Owner 1 block behind (owner=9, us=10).
-        // dominant effective = 9+5=14, local effective = 10+0=10, threshold = 10+3=13
-        // 14 > 13 → true → Switch
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
-        let forks = vec![local_fork(10), remote_fork_owner(1, 9, 2)];
-        let result = fr.evaluate(10, &forks, 3, hash(0));
-        match result {
-            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 9),
-            other => panic!("expected Resolve, got {:?}", other),
+    fn chain_owner_behind_does_not_override_height() {
+        // The owner used to carry a virtual +5, so its fork won while 1 block
+        // SHORTER — which let an owner that minted alone out-rank a witnessed
+        // chain. Ownership no longer moves height: behind is behind.
+        for owner_height in [9u64, 8, 7] {
+            let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+            let forks = vec![local_fork(10), remote_fork_owner(1, owner_height, 2)];
+            assert_eq!(
+                fr.evaluate(10, &forks, 3, hash(0)),
+                ForkDecision::NoAction,
+                "owner at {owner_height} behind local 10 must not win"
+            );
         }
     }
 
     #[test]
-    fn chain_owner_behind_2_blocks_no_switch() {
-        // Owner 2 blocks behind (owner=8, us=10).
-        // dominant effective = 8+5=13, local effective = 10+0=10, threshold = 10+3=13
-        // 13 > 13 → false → NoAction (boundary: tied, no switch)
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
-        let forks = vec![local_fork(10), remote_fork_owner(1, 8, 2)];
-        assert_eq!(fr.evaluate(10, &forks, 3, hash(0)), ForkDecision::NoAction);
-    }
-
-    #[test]
-    fn chain_owner_behind_3_blocks_no_switch() {
-        // Owner 3 blocks behind (owner=7, us=10).
-        // dominant effective = 7+5=12, local effective = 10+0=10, threshold = 10+3=13
-        // 12 > 13 → false → NoAction
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
-        let forks = vec![local_fork(10), remote_fork_owner(1, 7, 2)];
-        assert_eq!(fr.evaluate(10, &forks, 3, hash(0)), ForkDecision::NoAction);
-    }
-
-    #[test]
     fn chain_owner_local_stays() {
-        // We are the owner (local), equal height → should NOT switch.
-        // dominant effective = 10+0=10, local effective = 10+5=15, threshold = 15+3=18
-        // 10 > 18 → false → NoAction
+        // We are the owner, equal height, equal grade → tiebreak favours us.
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks = vec![local_fork_owner(10), remote_fork(1, 10, 2)];
         assert_eq!(fr.evaluate(10, &forks, 3, hash(0)), ForkDecision::NoAction);
     }
 
     #[test]
-    fn non_owner_needs_9_blocks_to_override_owner() {
-        // We are owner (local=10), non-owner remote at 18.
-        // dominant effective = 18+0=18, local effective = 10+5=15, threshold = 15+3=18
-        // 18 > 18 → false → NoAction (8-block lead not enough)
+    fn owner_has_no_height_edge_against_a_longer_fork() {
+        // Previously a non-owner needed a 9-block lead to override the owner
+        // (owner +5, plus the 3-block steady-state threshold). Now the ordinary
+        // threshold applies to everyone: 3 ahead is not enough, 4 is.
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
-        let forks = vec![local_fork_owner(10), remote_fork(1, 18, 2)];
+        let forks = vec![local_fork_owner(10), remote_fork(1, 13, 2)];
         assert_eq!(fr.evaluate(10, &forks, 3, hash(0)), ForkDecision::NoAction);
 
-        // Non-owner at 19: 19 > 18 → true → Switch
         let mut fr2 = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
-        let forks2 = vec![local_fork_owner(10), remote_fork(1, 19, 2)];
+        let forks2 = vec![local_fork_owner(10), remote_fork(1, 14, 2)];
         match fr2.evaluate(10, &forks2, 3, hash(0)) {
-            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 19),
+            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 14),
             other => panic!("expected Resolve, got {:?}", other),
         }
     }
@@ -1033,6 +1343,218 @@ mod tests {
                 assert_eq!(target_chain_id, 0xBBBB);
             }
             other => panic!("expected Adopt, got {:?}", other),
+        }
+    }
+
+    // ── Legitimacy hierarchy (F2 / F10) ──
+
+    fn witnessed(weakest: u64, weakest_r1: u64, coverage: u64, total: u64) -> SegmentLegitimacy {
+        SegmentLegitimacy::Witnessed(Grade { weakest, weakest_r1, coverage, total })
+    }
+
+    fn solo(first_solo: u64, variety: u64, density_x1000: u64, witnessed_blocks: u64, balance: u64, total: u64)
+        -> SegmentLegitimacy
+    {
+        SegmentLegitimacy::SelfVoted {
+            first_solo,
+            grade: SoloGrade { variety, density_x1000, witnessed_blocks, balance, total },
+        }
+    }
+
+    fn local_with(height: u64, legitimacy: SegmentLegitimacy, prefix_end: u64) -> ForkInfo {
+        ForkInfo {
+            tip_hash: hash(0),
+            height,
+            peer_count: 1,
+            is_local: true,
+            has_chain_owner: false,
+            legitimacy,
+            witnessed_prefix_end: prefix_end,
+        }
+    }
+
+    fn remote_with(id: u8, height: u64, peer_count: usize, legitimacy: SegmentLegitimacy) -> ForkInfo {
+        ForkInfo {
+            tip_hash: hash(id),
+            height,
+            peer_count,
+            is_local: false,
+            has_chain_owner: false,
+            legitimacy,
+            witnessed_prefix_end: 0,
+        }
+    }
+
+    /// The two-node incident, exactly: a witnessed 20-block chain must not yield
+    /// to a 40-block chain minted alone. Fails on the pre-hierarchy resolver,
+    /// which compared height only and returned `Resolve`.
+    #[test]
+    fn self_voted_longer_fork_never_wins() {
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![
+            local_with(20, witnessed(2, 2, 2, 40), 20),
+            remote_with(1, 40, 1, solo(21, 1, 1000, 0, 20, 20)),
+        ];
+        assert_eq!(fr.evaluate(20, &forks, 2, hash(0)), ForkDecision::NoAction);
+    }
+
+    #[test]
+    fn self_voted_local_abandons_to_shorter_witnessed_rival() {
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![
+            local_with(36, solo(27, 1, 1000, 0, 10, 10), 26),
+            remote_with(1, 30, 1, witnessed(2, 2, 2, 8)),
+        ];
+        match fr.evaluate(36, &forks, 2, hash(0)) {
+            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 30),
+            other => panic!("a self-voted local segment must yield, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn owner_edge_cannot_rescue_a_self_voted_owner() {
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let mut local = local_with(40, solo(21, 1, 1000, 0, 20, 20), 20);
+        local.has_chain_owner = true;
+        let forks = vec![local, remote_with(1, 24, 1, witnessed(2, 2, 2, 8))];
+        match fr.evaluate(40, &forks, 2, hash(0)) {
+            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 24),
+            other => panic!("ownership must not outrank legitimacy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_rival_is_assessed_not_adopted() {
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![
+            local_with(20, witnessed(2, 2, 2, 40), 20),
+            remote_with(1, 40, 3, SegmentLegitimacy::Unknown),
+        ];
+        match fr.evaluate(20, &forks, 3, hash(0)) {
+            ForkDecision::Assess { target_height, from_height, .. } => {
+                assert_eq!(target_height, 40);
+                assert_eq!(from_height, 20);
+            }
+            other => panic!("an unassessed rival must be assessed first, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_offline_node_never_adopts_a_solo_run() {
+        // B was merely offline: it holds the witnessed prefix at 26 and nothing
+        // above. A solo-mined to 36. From B's side: NoAction. From A's side:
+        // abandon to 26. Decisions are complementary.
+        let mut b = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let b_view = vec![
+            local_with(26, SegmentLegitimacy::NotContesting, 26),
+            remote_with(1, 36, 1, solo(27, 1, 1000, 0, 10, 10)),
+        ];
+        assert_eq!(b.evaluate(26, &b_view, 1, hash(0)), ForkDecision::NoAction);
+
+        let mut a = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let a_view = vec![
+            local_with(36, solo(27, 1, 1000, 0, 10, 10), 26),
+            remote_with(2, 26, 1, SegmentLegitimacy::NotContesting),
+        ];
+        match a.evaluate(36, &a_view, 1, hash(0)) {
+            ForkDecision::AbandonSelfVoted { to_height, first_solo, .. } => {
+                assert_eq!(to_height, 26);
+                assert_eq!(first_solo, 27);
+            }
+            other => panic!("the solo node must come back to the prefix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_solo_runs_present_the_more_varied_one_wins() {
+        // Local: 10 blocks all by key A. Rival: 6 blocks, A and B alternating.
+        // Variety 2 beats variety 1 despite being shorter; local yields.
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![
+            local_with(36, solo(27, 1, 1000, 0, 10, 10), 26),
+            remote_with(1, 32, 1, solo(27, 2, 1000, 0, 3, 6)),
+        ];
+        match fr.evaluate(36, &forks, 1, hash(0)) {
+            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 32),
+            other => panic!("more varied participation must win, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn solo_density_beats_solo_length_at_equal_variety() {
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![
+            local_with(40, solo(21, 2, 1000, 0, 10, 20), 20),
+            remote_with(1, 30, 1, solo(21, 2, 1500, 0, 5, 15)),
+        ];
+        match fr.evaluate(40, &forks, 1, hash(0)) {
+            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 30),
+            other => panic!("denser participation must win, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn solo_balance_separates_9_1_from_5_5() {
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![
+            local_with(30, solo(21, 2, 1000, 0, 1, 10), 20),   // 9/1 split
+            remote_with(1, 30, 1, solo(21, 2, 1000, 0, 5, 10)), // 5/5 split
+        ];
+        match fr.evaluate(30, &forks, 1, hash(0)) {
+            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 30),
+            other => panic!("balanced participation must win, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_identical_solo_runs_yield_exactly_one_side() {
+        // Equal on every measure; lower tip hash wins — from BOTH points of view.
+        let g = solo(21, 1, 1000, 0, 10, 10);
+        // Node with tip hash(0) vs node with tip hash(1): hash(0) is lower.
+        let mut lo = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let lo_view = vec![local_with(30, g, 20), remote_with(1, 30, 1, g)];
+        assert_eq!(lo.evaluate(30, &lo_view, 1, hash(0)), ForkDecision::NoAction, "lower hash keeps its run");
+
+        let mut hi = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let mut hi_local = local_with(30, g, 20);
+        hi_local.tip_hash = hash(1);
+        let mut hi_rival = remote_with(0, 30, 1, g);
+        hi_rival.tip_hash = hash(0);
+        let hi_view = vec![hi_local, hi_rival];
+        match hi.evaluate(30, &hi_view, 1, hash(1)) {
+            ForkDecision::Resolve { target_hash, .. } => assert_eq!(target_hash, hash(0)),
+            other => panic!("higher hash must yield, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grade_orders_weakest_before_total_before_length() {
+        // 6 blocks all 3-witness beats 10 blocks all 2-witness: weakest first.
+        assert!(Grade { weakest: 3, weakest_r1: 3, coverage: 3, total: 18 }
+            > Grade { weakest: 2, weakest_r1: 2, coverage: 2, total: 20 });
+        // Equal weakest: total decides.
+        assert!(Grade { weakest: 2, weakest_r1: 2, coverage: 2, total: 20 }
+            > Grade { weakest: 2, weakest_r1: 2, coverage: 2, total: 12 });
+        // Equal grade → the resolver falls through to height.
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let g = witnessed(2, 2, 2, 20);
+        let forks = vec![local_with(15, g, 15), remote_with(1, 19, 2, g)];
+        match fr.evaluate(15, &forks, 3, hash(0)) {
+            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 19),
+            other => panic!("equal grade must fall through to height, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_more_legitimate_but_shorter_witnessed_fork_wins() {
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![
+            local_with(30, witnessed(2, 2, 2, 60), 30),
+            remote_with(1, 26, 2, witnessed(3, 3, 3, 78)),
+        ];
+        match fr.evaluate(30, &forks, 3, hash(0)) {
+            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 26),
+            other => panic!("higher grade must win regardless of length, got {other:?}"),
         }
     }
 }

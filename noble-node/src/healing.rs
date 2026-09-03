@@ -31,6 +31,8 @@ use noble_crypto::Hash256;
 use noble_mempool::Mempool;
 use noble_network::NetworkCommand;
 use noble_storage::StorageEngine;
+use noble_api::state::TipLegitimacy;
+use noble_consensus::SegmentLegitimacy;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::{broadcast, mpsc};
 
@@ -215,6 +217,13 @@ pub enum HealingClue {
         target_height: u64,
         reason: String,
     },
+    /// Our own segment is self-voted and a peer holds the witnessed prefix we
+    /// share: roll back to it and adopt nothing.
+    AbandonSelfVoted {
+        to_height: u64,
+        first_solo: u64,
+        reason: String,
+    },
 }
 
 /// Collects clues from all detection sources within a tick, then
@@ -261,6 +270,12 @@ pub enum HealingAction {
         target_chain_id: u32,
         reason: String,
     },
+    /// Abandon our self-voted segment back to the witnessed prefix; no adoption.
+    AbandonSelfVoted {
+        to_height: u64,
+        first_solo: u64,
+        reason: String,
+    },
 }
 
 /// Pick the highest-priority action from a set of clues.
@@ -282,6 +297,17 @@ fn pick_healing_action(clues: &[HealingClue], local_height: u64) -> HealingActio
             return HealingAction::Resolve {
                 target_hash: *target_hash,
                 target_height: *target_height,
+                reason: reason.clone(),
+            };
+        }
+    }
+
+    // Priority 2b: Abandon a self-voted local segment (rollback only, no adoption).
+    for clue in clues {
+        if let HealingClue::AbandonSelfVoted { to_height, first_solo, reason } = clue {
+            return HealingAction::AbandonSelfVoted {
+                to_height: *to_height,
+                first_solo: *first_solo,
                 reason: reason.clone(),
             };
         }
@@ -373,6 +399,20 @@ pub struct HealingManager<S: StorageEngine + Send + Sync + 'static> {
     /// re-founds correctly is not shunned forever. This replaced a halt: the
     /// node used to stop entirely rather than just stop pulling from one peer.
     rejected_sync_sources: HashMap<Vec<u8>, std::time::Instant>,
+
+    // ── Legitimacy assessment (F3–F6) ──
+    /// Rival segments being fetched for assessment, keyed by peer id bytes.
+    awaiting_assessment: HashMap<Vec<u8>, AssessmentRun>,
+    /// Completed verdicts keyed by the rival's tip hash (hex). A verdict is
+    /// about a specific tip, so it needs no invalidation: a peer that moves
+    /// its tip simply has no verdict until assessed again.
+    assessments: HashMap<String, SegmentLegitimacy>,
+    /// F5: the one case in which under-witnessed blocks may be imported —
+    /// the resolver decided a self-voted rival is the best chain available
+    /// (only solo runs exist and it out-grades ours). `(peer, tip hash hex)`.
+    solo_adoption_permit: Option<(Vec<u8>, String)>,
+    /// F4: cached verdict on our own segment: `((ancestor, tip), legitimacy, witnessed_prefix_end)`.
+    local_legitimacy_cache: Option<((u64, [u8; 32]), SegmentLegitimacy, u64)>,
 
     // ── Fork state ──
     fork_visible: bool,
@@ -471,6 +511,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             sync_progress_total,
             sync_blocks_delivered: Arc::new(AtomicU64::new(0)),
             rejected_sync_sources: HashMap::new(),
+            awaiting_assessment: HashMap::new(),
+            assessments: HashMap::new(),
+            solo_adoption_permit: None,
+            local_legitimacy_cache: None,
             fork_visible: false,
             fork_common_ancestor: None,
             healing_phase: HealingPhase::Idle,
@@ -568,6 +612,8 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 format!("cross_chain_adopt (chain {:#010X})", target_chain_id),
             HealingClue::SyncStall { stalled_height, .. } =>
                 format!("sync_stall (block {stalled_height})"),
+            HealingClue::AbandonSelfVoted { to_height, first_solo, .. } =>
+                format!("abandon_self_voted (solo from {first_solo}, back to {to_height})"),
         };
         self.broadcast_event(serde_json::json!({
             "event": "healing_clue",
@@ -628,6 +674,19 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 }));
                 self.healing_phase = HealingPhase::Resolving;
                 self.execute_resolution(target_hash, target_height, &reason);
+                self.healing_phase = HealingPhase::Syncing;
+            }
+            HealingAction::AbandonSelfVoted { to_height, first_solo, reason } => {
+                self.broadcast_event(serde_json::json!({
+                    "event": "healing_action",
+                    "action": "abandon_self_voted",
+                    "to_height": to_height,
+                    "first_solo": first_solo,
+                    "reason": &reason,
+                    "clue_count": clues.len(),
+                }));
+                self.healing_phase = HealingPhase::Resolving;
+                self.execute_abandon(to_height, first_solo, &reason);
                 self.healing_phase = HealingPhase::Syncing;
             }
             HealingAction::None => {}
@@ -755,6 +814,256 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
     /// Returns true if actively syncing (not Idle).
     pub fn is_syncing(&self) -> bool { !matches!(self.sync_state, SyncState::Idle) }
+
+    // ── Legitimacy (F3–F7) ──────────────────────────────────────────────────
+
+    /// Hex tip hash currently advertised by `peer`, if known.
+    fn peer_tip_hex(&self, peer: &[u8]) -> Option<String> {
+        let hex_pid = hex::encode(peer);
+        self.peer_info.read().get(&hex_pid).and_then(|e| e.chain_tip_hash.clone())
+    }
+
+    /// A connected same-chain peer advertising `tip` as its chain tip.
+    fn peer_for_tip(&self, tip: Hash256) -> Option<Vec<u8>> {
+        let tip_hex = hex::encode(tip.as_bytes());
+        let peers = self.peer_info.read();
+        peers
+            .values()
+            .find(|e| e.chain_tip_hash.as_deref() == Some(tip_hex.as_str()))
+            .and_then(|e| hex::decode(&e.peer_id).ok())
+    }
+
+    /// Verdict on a rival tip, from completed assessments only. `Hash256::ZERO`
+    /// (the `SyncChainMismatch` path) resolves to the current sync peer's tip.
+    fn rival_legitimacy_for(&self, target: Hash256) -> SegmentLegitimacy {
+        let tip_hex = if target == Hash256::ZERO {
+            match self.sync_peer().and_then(|p| self.peer_tip_hex(p)) {
+                Some(t) => t,
+                None => return SegmentLegitimacy::Unknown,
+            }
+        } else {
+            hex::encode(target.as_bytes())
+        };
+        self.assessments.get(&tip_hex).copied().unwrap_or(SegmentLegitimacy::Unknown)
+    }
+
+    /// F4: legitimacy of OUR segment above `ancestor`, re-verifying every
+    /// stored certificate. Returns the verdict and `witnessed_prefix_end`.
+    pub fn local_segment_legitimacy(&self, ancestor: u64) -> (SegmentLegitimacy, u64) {
+        let (tip_height, tip_hash) = self.consensus.read().chain_tip();
+        let key = (ancestor, tip_hash.0);
+        if let Some((k, leg, end)) = &self.local_legitimacy_cache {
+            if *k == key {
+                return (*leg, *end);
+            }
+        }
+        if tip_height <= ancestor {
+            return (SegmentLegitimacy::NotContesting, tip_height);
+        }
+        let required = self.consensus.read().min_unique_voters();
+        let validators = self
+            .consensus
+            .read()
+            .validator_snapshot()
+            .map(|s| s.count)
+            .unwrap_or(required)
+            .max(required);
+        let staged: Vec<StagedBlock> = {
+            let storage = self.storage.read();
+            (ancestor + 1..=tip_height)
+                .map(|h| {
+                    let hash = storage.get_block_hash_by_height(h).unwrap_or(Hash256::ZERO);
+                    let proposer = storage
+                        .get_block_header(&hash)
+                        .map(|hd| hd.validator_id.to_wire_bytes())
+                        .unwrap_or_default();
+                    let facts = storage
+                        .get_block_votes(h)
+                        .ok()
+                        .flatten()
+                        .and_then(|raw| certificate_facts(Some(&raw), hash));
+                    StagedBlock::from_facts(h, hash, proposer, facts)
+                })
+                .collect()
+        };
+        let (leg, end) = grade_segment(&staged, ancestor, required, validators);
+        (leg, end)
+    }
+
+    /// F3: begin fetching `(from, to]` of the rival that advertises `tip`,
+    /// with votes, for assessment. Nothing is adopted until it completes.
+    fn start_assessment(&mut self, tip: Hash256, from: u64, to: u64) {
+        let Some(peer) = self.peer_for_tip(tip) else { return };
+        if self.awaiting_assessment.contains_key(&peer) {
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut run = AssessmentRun {
+            tip_hex: hex::encode(tip.as_bytes()),
+            from,
+            to,
+            staged: std::collections::BTreeMap::new(),
+            requested: HashMap::new(),
+        };
+        for h in from + 1..=to {
+            run.requested.insert(h, (now, 1));
+            self.send_network(NetworkCommand::RequestBlockByHeight { peer_id: peer.clone(), height: h });
+        }
+        tracing::info!(
+            task = "fork_assessment",
+            peer = %hex::encode(&peer),
+            from, to,
+            "assessing rival segment from its certificates before any decision"
+        );
+        self.awaiting_assessment.insert(peer, run);
+    }
+
+    /// True if a `BlockReceived` from `peer` at `height` belongs to an
+    /// assessment and must NOT be routed to sync import.
+    pub fn is_assessment_block(&self, peer: &[u8], height: u64) -> bool {
+        self.awaiting_assessment
+            .get(peer)
+            .is_some_and(|r| height > r.from && height <= r.to && !r.staged.contains_key(&height))
+    }
+
+    /// F3: record one assessed block. Verifies the proposer signature and the
+    /// witness certificate; completes the run when the range is full.
+    pub fn assess_block(&mut self, peer: &[u8], block: &noble_core::Block, vote_data: Option<&[u8]>) {
+        let Some(run) = self.awaiting_assessment.get_mut(peer) else { return };
+        let h = block.header.height;
+        if h <= run.from || h > run.to || run.staged.contains_key(&h) {
+            return;
+        }
+        let hash = block.header.compute_block_hash().unwrap_or(Hash256::ZERO);
+        // Proposer identity is only as good as the block signature (B8).
+        let proposer_ok = block
+            .header
+            .compute_signing_message()
+            .ok()
+            .and_then(|m| block.header.validator_id.verify(&m, &block.header.validator_sig).ok())
+            .is_some();
+        let proposer = if proposer_ok { block.header.validator_id.to_wire_bytes() } else { Vec::new() };
+        let facts = certificate_facts(vote_data, hash);
+        run.staged.insert(h, StagedBlock::from_facts(h, hash, proposer, facts));
+        run.requested.remove(&h);
+        if run.staged.len() as u64 == run.to - run.from {
+            self.complete_assessment(peer);
+        }
+    }
+
+    /// F3: bounded lifetime. Re-request stale heights; after the retry budget
+    /// an unserved block is scored unprovable (w = 0) and the run completes.
+    fn tick_assessments(&mut self, now: u64) {
+        let peers: Vec<Vec<u8>> = self.awaiting_assessment.keys().cloned().collect();
+        for peer in peers {
+            let mut exhausted: Vec<u64> = Vec::new();
+            let mut retry: Vec<u64> = Vec::new();
+            if let Some(run) = self.awaiting_assessment.get_mut(&peer) {
+                for (h, (at, attempts)) in run.requested.iter_mut() {
+                    if now.saturating_sub(*at) < SYNC_RETRY_SECS {
+                        continue;
+                    }
+                    if *attempts >= SYNC_MAX_BLOCK_RETRIES {
+                        exhausted.push(*h);
+                    } else {
+                        *attempts += 1;
+                        *at = now;
+                        retry.push(*h);
+                    }
+                }
+                for h in &exhausted {
+                    run.requested.remove(h);
+                    run.staged.insert(*h, StagedBlock::from_facts(*h, Hash256::ZERO, Vec::new(), None));
+                }
+            }
+            for h in retry {
+                self.send_network(NetworkCommand::RequestBlockByHeight { peer_id: peer.clone(), height: h });
+            }
+            let done = self
+                .awaiting_assessment
+                .get(&peer)
+                .is_some_and(|r| r.staged.len() as u64 == r.to - r.from);
+            if done {
+                self.complete_assessment(&peer);
+            }
+        }
+    }
+
+    fn complete_assessment(&mut self, peer: &[u8]) {
+        let Some(run) = self.awaiting_assessment.remove(peer) else { return };
+        let required = self.consensus.read().min_unique_voters();
+        let validators = self
+            .consensus
+            .read()
+            .validator_snapshot()
+            .map(|s| s.count)
+            .unwrap_or(required)
+            .max(required);
+        let staged: Vec<StagedBlock> = run.staged.into_values().collect();
+        let (leg, _) = grade_segment(&staged, run.from, required, validators);
+        tracing::info!(
+            task = "fork_assessment",
+            peer = %hex::encode(peer),
+            tip = %run.tip_hex,
+            legitimacy = leg.label(),
+            "rival segment assessed"
+        );
+        // Mirror onto every peer advertising this tip, for RPC/GUI display.
+        {
+            let mut peers = self.peer_info.write();
+            for e in peers.values_mut() {
+                if e.chain_tip_hash.as_deref() == Some(run.tip_hex.as_str()) {
+                    e.tip_legitimacy = Some(tip_legitimacy_view(&run.tip_hex, &leg));
+                }
+            }
+        }
+        self.broadcast_event(serde_json::json!({
+            "event": "fork_assessed",
+            "tip_hash": run.tip_hex,
+            "from_height": run.from,
+            "to_height": run.to,
+            "rival_legitimacy": leg.label(),
+            "detail": format!("{leg:?}"),
+        }));
+        self.assessments.insert(run.tip_hex, leg);
+    }
+
+    /// F7: abandon our self-voted segment back to the witnessed prefix. No
+    /// adoption, no operator branch: by F1 the rollback floor only anchors on
+    /// witnessed blocks, so `to_height >= floor` holds by construction.
+    fn execute_abandon(&mut self, to_height: u64, first_solo: u64, reason: &str) {
+        let from = self.consensus.read().chain_tip().0;
+        let floor = self.rollback_floor();
+        debug_assert!(
+            to_height >= floor,
+            "witnessed prefix end {to_height} below rollback floor {floor}: a solo block was finalized"
+        );
+        let target = to_height.max(floor);
+        tracing::warn!(
+            task = "fork_resolution",
+            from, to = target, first_solo,
+            "abandoning self-voted segment: {reason}"
+        );
+        self.rollback_to(target);
+        self.clear_cycle_history_storage();
+        self.fork_visible = false;
+        self.fork_common_ancestor = None;
+        self.local_legitimacy_cache = None;
+        self.clear_pending_proposals();
+        self.reset_sync_idle();
+        self.broadcast_event(serde_json::json!({
+            "event": "self_voted_abandoned",
+            "from": from,
+            "to": target,
+            "discarded": from.saturating_sub(target),
+            "first_solo": first_solo,
+            "reason": reason,
+        }));
+        self.request_sync();
+    }
 
     /// Returns sync progress as (current, total) or None if idle.
     pub fn sync_progress(&self) -> Option<(u64, u64)> {
@@ -1132,6 +1441,8 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     /// Reset sync state to Idle and update atomics.
     fn reset_sync_idle(&mut self) {
         self.sync_state = SyncState::Idle;
+        // F5: a solo-adoption permit is scoped to one sync.
+        self.solo_adoption_permit = None;
         // A clean idle reset (typically sync-complete) clears the failure streak.
         self.sync_failure_streak = 0;
         self.sync_atomics_from_state();
@@ -1944,6 +2255,79 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                             self.reset_sync_idle();
                             return;
                         }
+                        RejectKind::WitnessMissing => {
+                            // Re-request by height — that path serves
+                            // `get_block_votes`; batch sync and the by-hash
+                            // gossip retry do not. Ordinary retry accounting,
+                            // so an unprovable block still escalates.
+                            let attempts = match manifest[*cursor].status {
+                                EntryStatus::Failed { attempts } => attempts + 1,
+                                _ => 1,
+                            };
+                            if attempts >= SYNC_MAX_BLOCK_RETRIES {
+                                tracing::warn!(
+                                    task = "sync",
+                                    "block {height} still has no witness record after {attempts} \
+                                     attempts — unprovable, treating as legitimacy 0"
+                                );
+                                self.drop_sync_source(&reason);
+                                self.broadcast_event(serde_json::json!({
+                                    "event": "sync_source_rejected",
+                                    "height": height,
+                                    "reason": reason,
+                                    "under_witnessed": true,
+                                    "message": format!(
+                                        "Peer never proved block {height}'s witnesses — \
+                                         unprovable is legitimacy 0"
+                                    ),
+                                }));
+                                self.reset_sync_idle();
+                                return;
+                            }
+                            tracing::warn!(
+                                task = "sync",
+                                "block {height} served without its witness record \
+                                 (attempt {attempts}) — re-requesting by height: {reason}"
+                            );
+                            manifest[*cursor].status = EntryStatus::Failed { attempts };
+                            if let Some(peer) = self.sync_peer().cloned() {
+                                self.send_network(NetworkCommand::RequestBlockByHeight {
+                                    peer_id: peer,
+                                    height,
+                                });
+                            }
+                        }
+                        RejectKind::SelfVoted => {
+                            tracing::warn!(
+                                task = "sync",
+                                "sync block {height} is under-witnessed ({reason}) — this peer's \
+                                 chain has legitimacy 0; dropping it as a sync source"
+                            );
+                            if let Some(peer) = self.sync_peer().cloned() {
+                                if let Some(tip) = self.peer_tip_hex(&peer) {
+                                    self.assessments.insert(
+                                        tip,
+                                        SegmentLegitimacy::SelfVoted {
+                                            first_solo: height,
+                                            grade: noble_consensus::SoloGrade::default(),
+                                        },
+                                    );
+                                }
+                            }
+                            self.drop_sync_source(&reason);
+                            self.broadcast_event(serde_json::json!({
+                                "event": "sync_source_rejected",
+                                "height": height,
+                                "reason": reason,
+                                "under_witnessed": true,
+                                "message": format!(
+                                    "Peer's chain is self-voted from height {height} — legitimacy 0, \
+                                     not adopting"
+                                ),
+                            }));
+                            self.reset_sync_idle();
+                            return;
+                        }
                         RejectKind::Invalid => {
                             let attempts = match manifest[*cursor].status {
                                 EntryStatus::Failed { attempts } => attempts + 1,
@@ -2013,6 +2397,19 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             // already judged unacceptable.
             if self.is_rejected_sync_source(&pid) {
                 continue;
+            }
+            // F5: "no node syncs with it" — a tip assessed self-voted is not a
+            // source, unless the resolver decided it is the best chain there is.
+            if let Some(tip) = entry.chain_tip_hash.as_ref() {
+                if matches!(self.assessments.get(tip), Some(SegmentLegitimacy::SelfVoted { .. })) {
+                    let permitted = self
+                        .solo_adoption_permit
+                        .as_ref()
+                        .is_some_and(|(p, t)| *p == pid && t == tip);
+                    if !permitted {
+                        continue;
+                    }
+                }
             }
             if let Some(v) = entry.verified_height {
                 if v > our_height && best_verified.as_ref().is_none_or(|(_, bh)| v > *bh) {
@@ -2129,6 +2526,15 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         // The sync_behind guard — never run fork resolution while syncing.
         if self.is_syncing() { return zero_result; }
 
+        // F3: assessments have a bounded lifetime — retry, then score unprovable.
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            self.tick_assessments(now);
+        }
+
         // Read consensus state.
         let engine_read = self.consensus.read();
         let (our_height, our_hash) = engine_read.chain_tip();
@@ -2139,7 +2545,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         let local_chain_id = self.get_chain_id();
         let peers = self.peer_info.read().clone();
 
-        let fork_groups = compute_fork_groups(
+        let mut fork_groups = compute_fork_groups(
             &peers,
             our_height,
             our_hash,
@@ -2147,6 +2553,29 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             our_identity_key.as_deref(),
             local_chain_id,
         );
+        // F4/F3: fill verified legitimacy — ours from storage, rivals from
+        // completed assessments; a rival tip that is a block on OUR chain holds
+        // only the shared prefix (NotContesting).
+        {
+            let ancestor = self.fork_common_ancestor.map(|(h, _)| h).unwrap_or(our_height);
+            let (local_leg, prefix_end) = self.local_segment_legitimacy(ancestor);
+            let storage = self.storage.read();
+            for f in fork_groups.iter_mut() {
+                if f.is_local {
+                    f.legitimacy = local_leg;
+                    f.witnessed_prefix_end = prefix_end;
+                    continue;
+                }
+                let tip_hex = hex::encode(f.tip_hash.as_bytes());
+                f.legitimacy = if f.height <= our_height
+                    && storage.get_block_hash_by_height(f.height).ok() == Some(f.tip_hash)
+                {
+                    SegmentLegitimacy::NotContesting
+                } else {
+                    self.assessments.get(&tip_hex).copied().unwrap_or(SegmentLegitimacy::Unknown)
+                };
+            }
+        }
         let total_peers = peers.len();
 
         // Emit fork_detected / fork_aligned events for GUI visibility.
@@ -2229,6 +2658,12 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                     task = "fork_resolution",
                     "fork resolution pending: {cycles_remaining} cycle(s) remaining"
                 );
+            }
+            noble_consensus::ForkDecision::Assess { target_hash, target_height, from_height } => {
+                self.start_assessment(target_hash, from_height, target_height);
+            }
+            noble_consensus::ForkDecision::AbandonSelfVoted { to_height, first_solo, reason } => {
+                self.ingest_clue(HealingClue::AbandonSelfVoted { to_height, first_solo, reason });
             }
             noble_consensus::ForkDecision::NoAction => {}
         }
@@ -2519,12 +2954,16 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     pub fn on_common_ancestor_found(&mut self, ancestor_height: u64, ancestor_hash: [u8; 32]) {
         let our_height = self.consensus.read().chain_tip().0;
         self.fork_common_ancestor = Some((ancestor_height, ancestor_hash));
+        self.local_legitimacy_cache = None;
+        let (local_leg, prefix_end) = self.local_segment_legitimacy(ancestor_height);
         self.broadcast_event(serde_json::json!({
             "event": "fork_divergence",
             "ancestor_height": ancestor_height,
             "ancestor_hash": hex::encode(ancestor_hash),
             "local_height": our_height,
             "divergence_depth": our_height.saturating_sub(ancestor_height),
+            "local_legitimacy": local_leg.label(),
+            "witnessed_prefix_end": prefix_end,
         }));
     }
 
@@ -2567,6 +3006,47 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             );
             return;
         };
+
+        // F6: acquire-verify-swap, applied at the swap. Every adoption path
+        // (ForkResolve, SyncChainMismatch, bootstrap SyncStall) passes here.
+        // A witnessed local segment is never traded for an unproven or
+        // self-voted one; a self-voted local segment yields to anything
+        // witnessed, or to a better-participated solo run (with a permit so
+        // its blocks may be imported).
+        let (local_leg, _prefix_end) = self.local_segment_legitimacy(ancestor_height);
+        let rival_leg = self.rival_legitimacy_for(target_hash);
+        match (local_leg, rival_leg) {
+            (SegmentLegitimacy::SelfVoted { .. }, SegmentLegitimacy::Witnessed(_)) => {}
+            (SegmentLegitimacy::SelfVoted { grade: mine, .. }, SegmentLegitimacy::SelfVoted { grade: theirs, .. })
+                if theirs > mine =>
+            {
+                if let Some(peer) = self.peer_for_tip(target_hash) {
+                    self.solo_adoption_permit =
+                        Some((peer, hex::encode(target_hash.as_bytes())));
+                }
+            }
+            (SegmentLegitimacy::Witnessed(mine), SegmentLegitimacy::Witnessed(theirs)) if theirs > mine => {}
+            (SegmentLegitimacy::Witnessed(mine), SegmentLegitimacy::Witnessed(theirs)) if theirs == mine => {
+                // Equal grade: the resolver's height/owner/peer rules decided. Proceed.
+            }
+            (local, rival) => {
+                tracing::warn!(
+                    task = "fork_resolution",
+                    local = local.label(),
+                    rival = rival.label(),
+                    "refusing resolution: local segment is not less legitimate than the target \
+                     (legitimacy is decided from verified certificates, never announcements)"
+                );
+                self.broadcast_event(serde_json::json!({
+                    "event": "fork_resolution_refused",
+                    "local_legitimacy": local.label(),
+                    "rival_legitimacy": rival.label(),
+                    "target_height": target_height,
+                    "reason": reason,
+                }));
+                return;
+            }
+        }
 
         let floor = self.rollback_floor();
         if ancestor_height < floor {
@@ -3413,9 +3893,48 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             }
         };
 
-        // Decay-weighted vote accumulation.
+        // F5 / F8: every non-genesis synced block must PROVE its witnesses.
+        // Genesis was handled above with its own Dual-Witness rules.
+        let verified = certificate_facts(vote_data, block_hash);
+        if block.header.height != noble_core::GENESIS_HEIGHT {
+            let required = self.consensus.read().min_unique_voters();
+            let w = verified.as_ref().map(|f| f.witnesses).unwrap_or(0);
+            if w < required {
+                let permitted = match (&self.solo_adoption_permit, self.sync_peer()) {
+                    (Some((peer, _)), Some(src)) => peer == src,
+                    _ => false,
+                };
+                if !permitted {
+                    // Absent record → transport, retryable. Present record that
+                    // verifies but falls short → the chain, terminal.
+                    let kind = if verified.is_none() {
+                        RejectKind::WitnessMissing
+                    } else {
+                        RejectKind::SelfVoted
+                    };
+                    return SyncImportResult::reject(
+                        kind,
+                        format!(
+                            "block {} carries {w} verified witness(es), {required} required — \
+                             legitimacy 0 and no solo-adoption permit for this source",
+                            block.header.height
+                        ),
+                    );
+                }
+                tracing::info!(
+                    task = "sync_import",
+                    height = block.header.height,
+                    witnesses = w,
+                    "importing under-witnessed block under solo-adoption permit (best chain available)"
+                );
+            }
+        }
+        // F8: credit the chain by the witnesses actually verified, not a flat 1.
+        // A synced two-witness chain used to report half the legitimacy of one
+        // watched live — indistinguishable from a solo run.
+        let credited = verified.as_ref().map(|f| f.witnesses as u64).unwrap_or(1).max(1);
         let old = self.chain_vote_weight.load(Ordering::Relaxed);
-        let new = noble_consensus::decay_vote_weight(old, 1);
+        let new = noble_consensus::decay_vote_weight(old, credited);
         self.chain_vote_weight.store(new, Ordering::Relaxed);
 
         // Chain identity comes from GENESIS, and only from genesis.
@@ -3633,6 +4152,232 @@ pub fn startup_integrity_check(chain_id: u32, tip_height: u64) -> bool {
     false
 }
 
+// ── Legitimacy gradation (F3/F4) ─────────────────────────────────────────────
+
+/// What a verified certificate proves about one block.
+#[derive(Debug, Clone, Default)]
+pub struct CertFacts {
+    /// Distinct signer keys (wire bytes).
+    pub keys: Vec<Vec<u8>>,
+    /// `|keys|`.
+    pub witnesses: usize,
+    /// Distinct signers with at least one round-1 vote.
+    pub r1: usize,
+}
+
+/// Decode `vote_data`, require the certificate to name `block_hash`, verify it,
+/// and report distinct signers and round-1 signers. `None` if anything fails —
+/// unprovable is scored as zero by the caller.
+pub fn certificate_facts(vote_data: Option<&[u8]>, block_hash: Hash256) -> Option<CertFacts> {
+    let vd = vote_data?;
+    let bv = <noble_consensus::BlockVotes as noble_codec::NobleCbor>::from_cbor(vd).ok()?;
+    let cert = bv.certificate?;
+    if cert.candidate_hash != block_hash {
+        return None;
+    }
+    cert.verify().ok()?;
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    let mut r1_keys: Vec<Vec<u8>> = Vec::new();
+    for v in &cert.votes {
+        let k = v.voter_pubkey.to_wire_bytes();
+        if !keys.contains(&k) {
+            keys.push(k.clone());
+        }
+        if v.round == 1 && !r1_keys.contains(&k) {
+            r1_keys.push(k);
+        }
+    }
+    Some(CertFacts { witnesses: keys.len(), r1: r1_keys.len(), keys })
+}
+
+/// One block of a segment under assessment, as verified facts.
+#[derive(Debug, Clone)]
+pub struct StagedBlock {
+    pub height: u64,
+    pub hash: Hash256,
+    /// Verified proposer key (empty if the block signature did not verify).
+    pub proposer: Vec<u8>,
+    pub facts: CertFacts,
+}
+
+impl StagedBlock {
+    fn from_facts(height: u64, hash: Hash256, proposer: Vec<u8>, facts: Option<CertFacts>) -> Self {
+        Self { height, hash, proposer, facts: facts.unwrap_or_default() }
+    }
+}
+
+/// A rival segment being fetched for assessment.
+#[derive(Debug)]
+struct AssessmentRun {
+    tip_hex: String,
+    from: u64,
+    to: u64,
+    staged: std::collections::BTreeMap<u64, StagedBlock>,
+    /// height → (last requested at, attempts)
+    requested: HashMap<u64, (u64, u8)>,
+}
+
+/// The gradation algorithm (plan Steps 1, 2, 2b), pure and integer-only.
+///
+/// Returns the verdict and `witnessed_prefix_end` — the highest height such
+/// that every block in `(ancestor, h]` is witnessed.
+pub fn grade_segment(
+    blocks: &[StagedBlock],
+    ancestor: u64,
+    required: usize,
+    validators: usize,
+) -> (SegmentLegitimacy, u64) {
+    let _ = validators; // reserved: density is reported per block, not per validator set
+    if blocks.is_empty() {
+        return (SegmentLegitimacy::NotContesting, ancestor);
+    }
+    let mut sorted: Vec<&StagedBlock> = blocks.iter().collect();
+    sorted.sort_by_key(|b| b.height);
+
+    // Step 1 — tier, and the witnessed prefix.
+    let mut prefix_end = ancestor;
+    let mut first_solo: Option<u64> = None;
+    for b in &sorted {
+        if b.facts.witnesses >= required {
+            if first_solo.is_none() {
+                prefix_end = b.height;
+            }
+        } else if first_solo.is_none() {
+            first_solo = Some(b.height);
+        }
+    }
+
+    match first_solo {
+        None => {
+            // Step 2 — Tier 1 grade.
+            let weakest = sorted.iter().map(|b| b.facts.witnesses as u64).min().unwrap_or(0);
+            let weakest_r1 = sorted.iter().map(|b| b.facts.r1 as u64).min().unwrap_or(0);
+            let mut coverage: Vec<&Vec<u8>> = Vec::new();
+            let mut total = 0u64;
+            for b in &sorted {
+                total += b.facts.witnesses as u64;
+                for k in &b.facts.keys {
+                    if !coverage.contains(&k) {
+                        coverage.push(k);
+                    }
+                }
+            }
+            (
+                SegmentLegitimacy::Witnessed(noble_consensus::Grade {
+                    weakest,
+                    weakest_r1,
+                    coverage: coverage.len() as u64,
+                    total,
+                }),
+                prefix_end,
+            )
+        }
+        Some(fs) => {
+            // Step 2b — Tier 0 participation grade. P(b) = witnesses ∪ {proposer}.
+            let mut participants: Vec<Vec<u8>> = Vec::new();
+            let mut per_key: HashMap<Vec<u8>, u64> = HashMap::new();
+            let mut total = 0u64;
+            let mut witnessed_blocks = 0u64;
+            for b in &sorted {
+                let mut p: Vec<Vec<u8>> = b.facts.keys.clone();
+                if !b.proposer.is_empty() && !p.contains(&b.proposer) {
+                    p.push(b.proposer.clone());
+                }
+                total += p.len() as u64;
+                if b.facts.witnesses >= required {
+                    witnessed_blocks += 1;
+                }
+                for k in p {
+                    *per_key.entry(k.clone()).or_insert(0) += 1;
+                    if !participants.contains(&k) {
+                        participants.push(k);
+                    }
+                }
+            }
+            let n = sorted.len() as u64;
+            let grade = noble_consensus::SoloGrade {
+                variety: participants.len() as u64,
+                density_x1000: total.saturating_mul(1000) / n.max(1),
+                witnessed_blocks,
+                balance: per_key.values().copied().min().unwrap_or(0),
+                total,
+            };
+            (SegmentLegitimacy::SelfVoted { first_solo: fs, grade }, prefix_end)
+        }
+    }
+}
+
+/// RPC/GUI view of a completed assessment.
+pub fn tip_legitimacy_view(tip_hex: &str, leg: &SegmentLegitimacy) -> TipLegitimacy {
+    match leg {
+        SegmentLegitimacy::Witnessed(g) => TipLegitimacy {
+            tip_hash: tip_hex.to_string(),
+            label: leg.label().to_string(),
+            weakest_witnesses: Some(g.weakest),
+            coverage: Some(g.coverage),
+            first_solo_height: None,
+        },
+        SegmentLegitimacy::SelfVoted { first_solo, grade } => TipLegitimacy {
+            tip_hash: tip_hex.to_string(),
+            label: leg.label().to_string(),
+            weakest_witnesses: None,
+            coverage: Some(grade.variety),
+            first_solo_height: Some(*first_solo),
+        },
+        _ => TipLegitimacy {
+            tip_hash: tip_hex.to_string(),
+            label: leg.label().to_string(),
+            weakest_witnesses: None,
+            coverage: None,
+            first_solo_height: None,
+        },
+    }
+}
+
+// ── Witnessed-floor helpers (F1) ─────────────────────────────────────────────
+
+/// True if the block at `height` has a stored, verifying witness certificate
+/// with at least `required` distinct signers naming that block's own hash.
+///
+/// This is the definition of "witnessed" used everywhere a rollback floor or a
+/// legitimacy verdict is computed: it re-verifies the certificate rather than
+/// trusting a stored count, so it cannot be satisfied by a record that merely
+/// *claims* witnesses.
+pub fn block_is_witnessed<S: StorageEngine + ?Sized>(storage: &S, height: u64, required: usize) -> bool {
+    let Ok(block_hash) = storage.get_block_hash_by_height(height) else { return false };
+    let Ok(Some(raw)) = storage.get_block_votes(height) else { return false };
+    let Ok(bv) = <noble_consensus::BlockVotes as noble_codec::NobleCbor>::from_cbor(&raw) else {
+        return false;
+    };
+    let Some(cert) = bv.certificate else { return false };
+    if cert.candidate_hash != block_hash {
+        return false;
+    }
+    matches!(cert.verify(), Ok(w) if w >= required)
+}
+
+/// Highest height `h ≤ height` whose block is witnessed (see
+/// [`block_is_witnessed`]). Genesis qualifies by construction of the
+/// Dual-Witness founding rule, so this returns `Some(0)` at worst for any
+/// chain with a stored genesis certificate; `None` only if nothing at all
+/// below `height` can prove its witnesses.
+pub fn highest_witnessed_at_or_below<S: StorageEngine + ?Sized>(
+    storage: &S,
+    height: u64,
+    required: usize,
+) -> Option<u64> {
+    let mut h = height;
+    loop {
+        if block_is_witnessed(storage, h, required) {
+            return Some(h);
+        }
+        if h == 0 {
+            return None;
+        }
+        h -= 1;
+    }
+}
+
 /// Result of a sync import attempt.
 #[derive(Debug)]
 pub enum SyncImportResult {
@@ -3674,6 +4419,24 @@ pub enum RejectKind {
     NoGenesis,
     /// Ordinary validation failure — retrying a different peer may succeed.
     Invalid,
+    /// F5: a non-genesis block whose certificate is PRESENT, verifies, and
+    /// names this block — but carries fewer than `min_unique_voters` distinct
+    /// signers. That is a statement about the CHAIN: legitimacy zero, terminal
+    /// for that source.
+    SelfVoted,
+    /// F5: a non-genesis block arrived with no usable witness record.
+    ///
+    /// Retryable, and the distinction from `SelfVoted` is the same one that
+    /// separates `GenesisWitnessMissing` from `GenesisUnacceptable`: whether a
+    /// certificate arrives depends on WHICH PATH served the block.
+    /// `GetBlockByHeight` carries vote data; batch `GetBlocks` sets
+    /// `vote_data: None` (service.rs), and so does the by-hash gossip retry.
+    /// Treating absence as a self-voted verdict would reject an honest chain
+    /// for a transport choice and drop the peer serving it — breaking ordinary
+    /// catch-up. Re-request over the vote-carrying path first; only when the
+    /// retry budget is exhausted is the block unprovable, and unprovable is
+    /// then legitimacy zero (plan Step 0).
+    WitnessMissing,
 }
 
 impl SyncImportResult {
@@ -3800,12 +4563,20 @@ pub(crate) fn compute_fork_groups(
             };
             let mut bytes = [0u8; 32];
             bytes.copy_from_slice(&decoded);
+            let is_local = tip_hash == local_tip_hex;
             Some(noble_consensus::ForkInfo {
                 tip_hash: Hash256::from_bytes(bytes),
                 height,
                 peer_count,
-                is_local: tip_hash == local_tip_hex,
+                is_local,
                 has_chain_owner: owner_group.as_ref() == Some(&tip_hash),
+                // Filled by the caller from verified certificates (F3/F4).
+                legitimacy: if is_local {
+                    SegmentLegitimacy::Witnessed(noble_consensus::Grade::default())
+                } else {
+                    SegmentLegitimacy::Unknown
+                },
+                witnessed_prefix_end: if is_local { local_height } else { 0 },
             })
         })
         .collect()
@@ -4300,6 +5071,233 @@ mod tests {
             "Blocked",
             "refusing a peer's chain must never halt this node"
         );
+    }
+
+    // ── Legitimacy gradation (F3–F8) ──
+
+    fn facts(keys: &[u8], r1: usize) -> CertFacts {
+        let keys: Vec<Vec<u8>> = keys.iter().map(|k| vec![*k]).collect();
+        CertFacts { witnesses: keys.len(), r1, keys }
+    }
+    fn staged(h: u64, proposer: u8, keys: &[u8]) -> StagedBlock {
+        StagedBlock::from_facts(h, Hash256::from_bytes([h as u8; 32]), vec![proposer], Some(facts(keys, keys.len())))
+    }
+
+    #[test]
+    fn witnessed_prefix_end_stops_at_the_first_solo_block() {
+        // ancestor 26; 27,28 witnessed; 29 solo; 30 witnessed (built on solo).
+        let seg = vec![staged(27, 1, &[1, 2]), staged(28, 2, &[1, 2]), staged(29, 1, &[1]), staged(30, 2, &[1, 2])];
+        let (leg, end) = grade_segment(&seg, 26, 2, 2);
+        assert_eq!(end, 28, "the witnessed prefix ends just below the first solo block");
+        match leg {
+            SegmentLegitimacy::SelfVoted { first_solo, .. } => assert_eq!(first_solo, 29),
+            other => panic!("a segment with one solo block is Tier 0, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fully_witnessed_segment_is_graded_weakest_first() {
+        let seg = vec![staged(1, 1, &[1, 2, 3]), staged(2, 2, &[1, 2]), staged(3, 3, &[2, 3])];
+        match grade_segment(&seg, 0, 2, 3).0 {
+            SegmentLegitimacy::Witnessed(g) => {
+                assert_eq!(g.weakest, 2);
+                assert_eq!(g.coverage, 3);
+                assert_eq!(g.total, 7);
+            }
+            other => panic!("expected Witnessed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn solo_grade_measures_participation_from_varied_peers() {
+        // All by key 1, self-witnessed: variety 1, density 1000, balance 3.
+        let mono = vec![staged(1, 1, &[1]), staged(2, 1, &[1]), staged(3, 1, &[1])];
+        // Proposed by 1, witnessed only by 2 (one witness, but two participants).
+        let duo = vec![staged(1, 1, &[2]), staged(2, 2, &[1]), staged(3, 1, &[2])];
+        let g1 = match grade_segment(&mono, 0, 2, 2).0 { SegmentLegitimacy::SelfVoted { grade, .. } => grade, o => panic!("{o:?}") };
+        let g2 = match grade_segment(&duo, 0, 2, 2).0 { SegmentLegitimacy::SelfVoted { grade, .. } => grade, o => panic!("{o:?}") };
+        assert_eq!(g1.variety, 1);
+        assert_eq!(g2.variety, 2);
+        assert_eq!(g2.density_x1000, 2000);
+        assert!(g2 > g1, "two participating peers out-grade one, regardless of witness count");
+    }
+
+    #[test]
+    fn an_empty_segment_is_not_contesting() {
+        assert_eq!(grade_segment(&[], 10, 2, 2), (SegmentLegitimacy::NotContesting, 10));
+    }
+
+    #[test]
+    fn certificate_facts_require_the_certificate_to_name_the_block() {
+        let hash = Hash256::from_bytes([0x5A; 32]);
+        let blob = witness_blob(hash, 2);
+        let f = certificate_facts(Some(&blob), hash).expect("valid certificate");
+        assert_eq!(f.witnesses, 2);
+        assert_eq!(f.r1, 2);
+        assert!(certificate_facts(Some(&blob), Hash256::from_bytes([0x5B; 32])).is_none());
+        assert!(certificate_facts(None, hash).is_none());
+    }
+
+    /// F1: a persisted finality anchor on an under-witnessed block is not a
+    /// floor — the algorithm lowers it to the highest witnessed block.
+    #[test]
+    fn a_persisted_solo_anchor_is_not_a_floor() {
+        let mut h = make_healing_manager();
+        let (hash, _) = found_chain(&mut h);
+        let required = h.consensus.read().min_unique_voters();
+        h.storage
+            .read()
+            .store_block_votes(noble_core::GENESIS_HEIGHT, &witness_blob(hash, required))
+            .unwrap();
+        let st = h.storage.read();
+        assert!(block_is_witnessed(&*st, 0, required));
+        assert!(!block_is_witnessed(&*st, 1, required), "nothing provable at height 1");
+        // A record claiming finality at height 1 must be lowered to genesis.
+        assert_eq!(highest_witnessed_at_or_below(&*st, 1, required), Some(0));
+        assert_eq!(highest_witnessed_at_or_below(&*st, 0, required), Some(0));
+    }
+
+    /// F5 regression guard: batch sync (`SyncResponse::Blocks`) and the
+    /// by-hash gossip retry both set `vote_data: None` (service.rs:1670). If
+    /// absence were treated as a self-voted verdict, ordinary catch-up would
+    /// reject honest chains and drop the peers serving them — the same
+    /// "gate correct, delivery path not enumerated" failure as the GetBlocks
+    /// genesis regression. Absence must be RETRYABLE over the vote-carrying
+    /// path; only a certificate that verifies and falls short is a verdict.
+    #[test]
+    fn a_block_served_without_votes_is_retryable_not_a_self_voted_verdict() {
+        let mut h = make_healing_manager();
+        let (genesis_hash, _) = found_chain(&mut h);
+        let required = h.consensus.read().min_unique_voters();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let validator = noble_test_utils::fixtures::TestKeypair::generate();
+        let (block, block_hash, _) = noble_test_utils::fixtures::make_block_with_coinbase(
+            vec![], 1, genesis_hash, now, &validator, &[],
+        );
+
+        // Served by a voteless path.
+        match h.try_sync_import(&block, None) {
+            SyncImportResult::Rejected { kind, ref reason } => assert_eq!(
+                kind,
+                RejectKind::WitnessMissing,
+                "absence is a transport fact, not a chain verdict: {reason}"
+            ),
+            other => panic!("expected a retryable refusal, got {other:?}"),
+        }
+
+        // Served WITH a certificate that verifies but falls short: a verdict.
+        let short = witness_blob(block_hash, required - 1);
+        match h.try_sync_import(&block, Some(&short)) {
+            SyncImportResult::Rejected { kind, ref reason } => assert_eq!(
+                kind,
+                RejectKind::SelfVoted,
+                "a proven shortfall is a chain verdict: {reason}"
+            ),
+            other => panic!("expected a terminal refusal, got {other:?}"),
+        }
+    }
+
+    fn peer_entry(peer: &[u8], tip_hex: &str, height: u64) -> PeerInfoEntry {
+        PeerInfoEntry {
+            peer_id: hex::encode(peer),
+            direction: "outbound".to_string(),
+            addr: String::new(),
+            connected_at: 0,
+            ban_score: 0,
+            misbehavior_categories: Vec::new(),
+            chain_tip_height: Some(height),
+            chain_tip_hash: Some(tip_hex.to_string()),
+            verified_height: None,
+            proposed_height: None,
+            identity_key: None,
+            node_name: None,
+            latency_ms: None,
+            last_ban_reason: None,
+            chain_id: None,
+            min_fee_rate: None,
+            tip_legitimacy: None,
+        }
+    }
+
+    /// F3: blocks fetched for assessment are evidence, not imports — the
+    /// routing predicate node.rs consults must claim them.
+    #[test]
+    fn assessment_blocks_are_claimed_before_sync_import() {
+        let mut h = make_healing_manager();
+        let peer = vec![7u8, 7, 7];
+        let tip = Hash256::from_bytes([0xC1; 32]);
+        h.peer_info.write().insert(hex::encode(&peer), peer_entry(&peer, &hex::encode(tip.as_bytes()), 30));
+        h.start_assessment(tip, 26, 30);
+        assert!(h.is_assessment_block(&peer, 27));
+        assert!(h.is_assessment_block(&peer, 30));
+        assert!(!h.is_assessment_block(&peer, 26), "the ancestor itself is not fetched");
+        assert!(!h.is_assessment_block(&peer, 31));
+        assert!(!h.is_assessment_block(&[9, 9, 9], 27), "other peers' blocks are not claimed");
+    }
+
+    /// F3: assessment always terminates. A peer that never serves votes is
+    /// scored unprovable — Tier 0 — after the retry budget, not waited on.
+    #[test]
+    fn assessment_terminates_when_a_peer_never_serves_votes() {
+        let mut h = make_healing_manager();
+        let peer = vec![7u8, 7, 7];
+        let tip = Hash256::from_bytes([0xC2; 32]);
+        let tip_hex = hex::encode(tip.as_bytes());
+        h.peer_info.write().insert(hex::encode(&peer), peer_entry(&peer, &tip_hex, 28));
+        h.start_assessment(tip, 26, 28);
+        assert!(h.assessments.get(&tip_hex).is_none());
+        // Advance well past the retry budget; each tick either retries or
+        // exhausts. Base on the real clock: `start_assessment` stamps requests
+        // with wall time, so a synthetic epoch never appears to elapse.
+        let mut now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        for _ in 0..(SYNC_MAX_BLOCK_RETRIES as u64 + 2) {
+            now += SYNC_RETRY_SECS + 1;
+            h.tick_assessments(now);
+        }
+        match h.assessments.get(&tip_hex) {
+            Some(SegmentLegitimacy::SelfVoted { first_solo, .. }) => assert_eq!(*first_solo, 27),
+            other => panic!("unprovable must resolve to Tier 0, got {other:?}"),
+        }
+        assert!(!h.is_assessment_block(&peer, 27), "completed runs release their heights");
+        let view = h.peer_info.read().get(&hex::encode(&peer)).unwrap().tip_legitimacy.clone();
+        assert_eq!(view.map(|v| v.label), Some("self_voted".to_string()));
+    }
+
+    /// F5: "no node syncs with it" — unless the resolver issued a permit.
+    #[test]
+    fn select_sync_peer_skips_a_self_voted_tip_unless_permitted() {
+        let mut h = make_healing_manager();
+        let peer = vec![7u8, 7, 7];
+        let tip_hex = "cc".repeat(32);
+        h.peer_info.write().insert(hex::encode(&peer), peer_entry(&peer, &tip_hex, 40));
+        h.assessments.insert(
+            tip_hex.clone(),
+            SegmentLegitimacy::SelfVoted { first_solo: 21, grade: noble_consensus::SoloGrade::default() },
+        );
+        assert_eq!(h.select_sync_peer(20, None).0, None, "a self-voted tip is not a source");
+        h.solo_adoption_permit = Some((peer.clone(), tip_hex.clone()));
+        assert_eq!(h.select_sync_peer(20, None).0, Some(peer), "the permitted peer is");
+        h.reset_sync_idle();
+        assert!(h.solo_adoption_permit.is_none(), "a permit is scoped to one sync");
+    }
+
+    /// F6: the swap point refuses to trade a witnessed chain for an unproven one.
+    #[test]
+    fn execute_resolution_refuses_when_local_is_witnessed_and_rival_unassessed() {
+        let mut h = make_healing_manager();
+        let (hash, _) = found_chain(&mut h);
+        h.fork_common_ancestor = Some((0, *hash.as_bytes()));
+        let before = h.consensus.read().chain_tip();
+        h.execute_resolution(Hash256::from_bytes([0xEE; 32]), 40, "test");
+        assert_eq!(h.consensus.read().chain_tip(), before, "no rollback may happen");
+        assert!(h.fork_common_ancestor.is_some(), "a refused resolution leaves fork state intact");
     }
 
     #[test]
@@ -4835,6 +5833,7 @@ mod tests {
             last_ban_reason: None,
             chain_id: None,
             min_fee_rate: None,
+            tip_legitimacy: None,
         };
         let a = hex::encode([0xAAu8; 4]);
         let b = hex::encode([0xBBu8; 4]);
@@ -5015,6 +6014,7 @@ mod tests {
                 latency_ms: None,
                 last_ban_reason: None,
                 min_fee_rate: None,
+                tip_legitimacy: None,
             },
         );
         let groups = compute_fork_groups(

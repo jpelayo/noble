@@ -1683,6 +1683,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         // Only include same-chain peers (chain_id match or unknown) to avoid
         // cross-chain peers appearing as "diverged" forks.
         let local_chain_id = self.chain_id.load(std::sync::atomic::Ordering::Relaxed);
+        let mut legit_by_tip: std::collections::HashMap<String, crate::state::TipLegitimacy> =
+            std::collections::HashMap::new();
         let peer_tips: Vec<(String, u64, String)> = {
             let info = self.peer_info.read();
             info.values()
@@ -1695,6 +1697,11 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                     }
                     let h = entry.chain_tip_height?;
                     let hash = entry.chain_tip_hash.clone()?;
+                    if let Some(tl) = entry.tip_legitimacy.as_ref() {
+                        if tl.tip_hash == hash {
+                            legit_by_tip.insert(hash.clone(), tl.clone());
+                        }
+                    }
                     Some((entry.peer_id.clone(), h, hash))
                 })
                 .collect()
@@ -1750,8 +1757,13 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                         Err(_) => Some(false),
                     }
                 };
+                let tl = legit_by_tip.get(&tip_hash);
                 ForkEntry {
                     is_local,
+                    legitimacy: tl.map(|t| t.label.clone()),
+                    weakest_witnesses: tl.and_then(|t| t.weakest_witnesses),
+                    coverage: tl.and_then(|t| t.coverage),
+                    first_solo_height: tl.and_then(|t| t.first_solo_height),
                     tip_hash,
                     height,
                     peers,

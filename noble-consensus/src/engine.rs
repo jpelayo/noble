@@ -1256,7 +1256,21 @@ impl CycleEngine {
                                 "cycle {cl}: committed block {} at height {} ({:?})",
                                 new_hash, new_height, strength
                             )));
-                            self.finality_tracker.on_block_committed(new_height, new_hash, completed_cycle);
+                            // F1: finality anchors only on WITNESSED blocks. A
+                            // solo-minted block never enters the window — it
+                            // breaks the monotonic sequence exactly like a
+                            // skipped cycle — so an isolated node can never
+                            // finalize its own run and make it un-abandonable.
+                            let witnessed = unique_witness >= self.config.min_unique_voters;
+                            if witnessed {
+                                self.finality_tracker.on_block_committed(new_height, new_hash, completed_cycle);
+                            } else {
+                                debug!(
+                                    "cycle {cl}: block {} at height {} has {} witness(es) < {} — \
+                                     not eligible for finality or checkpoint",
+                                    new_hash, new_height, unique_witness, self.config.min_unique_voters
+                                );
+                            }
                             let fh = self.finality_tracker.finalized_height;
                             if fh > 0 {
                                 outputs.push(CycleIo::PersistFinalityState {
@@ -1269,12 +1283,16 @@ impl CycleEngine {
                                     value: fh as f64,
                                 });
                             }
-                            if let Some(cp) = self.checkpoint_mgr.on_block_committed(
-                                new_height,
-                                new_hash,
-                                completed_cycle,
-                            ) {
-                                outputs.push(CycleIo::PersistCheckpoint(Box::new(cp)));
+                            // F1: checkpoints likewise anchor only on witnessed
+                            // blocks — a checkpoint is a rollback floor too.
+                            if witnessed {
+                                if let Some(cp) = self.checkpoint_mgr.on_block_committed(
+                                    new_height,
+                                    new_hash,
+                                    completed_cycle,
+                                ) {
+                                    outputs.push(CycleIo::PersistCheckpoint(Box::new(cp)));
+                                }
                             }
                         }
                     } else {
@@ -2785,6 +2803,38 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        make_valid_block_with_ts(val_priv, val_pub, height, prev_hash, now)
+    }
+
+    /// As [`make_valid_block`] with an explicit timestamp. Chained blocks must
+    /// carry strictly increasing timestamps (B5), and a test that builds two
+    /// blocks inside the same wall-clock second would otherwise fail B5 for a
+    /// reason unrelated to what it is testing.
+    fn make_valid_block_with_ts(
+        val_priv: &NoblePrivateKey,
+        val_pub: &NoblePublicKey,
+        height: u64,
+        prev_hash: Hash256,
+        now: u64,
+    ) -> (Box<Block>, Hash256) {
+        make_valid_block_full(val_priv, val_pub, height, prev_hash, now, test_chain_id())
+    }
+
+    /// As above with an explicit chain id.
+    ///
+    /// Transaction ids — and therefore the Merkle root — are bound to the chain
+    /// id. The engine re-derives its chain id from whichever genesis actually
+    /// commits, so a block built for a *different* id fails B4 with a merkle
+    /// mismatch. Any test that founds its own genesis must build later blocks
+    /// with the id the engine ended up on.
+    fn make_valid_block_full(
+        val_priv: &NoblePrivateKey,
+        val_pub: &NoblePublicKey,
+        height: u64,
+        prev_hash: Hash256,
+        now: u64,
+        chain_id: u32,
+    ) -> (Box<Block>, Hash256) {
 
         // Build a coinbase transaction (U9: every block must have exactly one)
         let subsidy = subsidy_at_height(height);
@@ -2810,8 +2860,7 @@ mod tests {
             contract_data: None,
             expires_at: None,
         };
-        // Sign the coinbase
-        let chain_id = test_chain_id();
+        // Sign the coinbase (bound to the caller's chain id)
         let cb_msg = coinbase_tx.compute_signing_message_for_chain(chain_id).unwrap();
         let cb_sig = val_priv.sign(&cb_msg).unwrap();
         let mut coinbase_signed = coinbase_tx;
@@ -3372,6 +3421,164 @@ mod tests {
         assert!(
             witnesses >= ConsensusConfig::default().min_unique_voters,
             "engine certificate must meet the same threshold the engine enforced: got {witnesses}"
+        );
+    }
+
+    // --- F1: finality and checkpoints anchor only on witnessed blocks ---
+
+    fn wall_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    fn found_genesis_with_two_witnesses(
+        engine: &mut CycleEngine,
+        a: (&NoblePrivateKey, &NoblePublicKey),
+        b: (&NoblePrivateKey, &NoblePublicKey),
+    ) -> Hash256 {
+        engine.tracked_cycle = 0;
+        engine.tracked_phase = CyclePhase::Proposal;
+        // Timestamps: genesis at `wall_now()`, block h at `wall_now() + h` (B5).
+        let (block, hash) =
+            make_valid_block_with_ts(a.0, a.1, noble_core::GENESIS_HEIGHT, Hash256::ZERO, wall_now());
+        engine.step(CycleEvent::BlockProposed { block, from_peer: b"p1".to_vec() });
+        engine.tracked_phase = CyclePhase::Voting;
+        for (i, (sk, pk)) in [a, b].iter().enumerate() {
+            let vote = PorVote::sign(0, hash, sk, (*pk).clone()).unwrap();
+            engine.step(CycleEvent::VoteReceived { vote, from_peer: format!("p{i}").into_bytes() });
+        }
+        let out = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
+        assert!(has_commit(&out), "two witnesses must found the chain");
+        hash
+    }
+
+    /// Propose `height` on `prev` and have `voters` witness it in cycle `height`.
+    fn commit_next(
+        engine: &mut CycleEngine,
+        proposer: (&NoblePrivateKey, &NoblePublicKey),
+        height: u64,
+        prev: Hash256,
+        voters: &[(&NoblePrivateKey, &NoblePublicKey)],
+    ) -> (Hash256, Vec<CycleIo>) {
+        engine.tracked_cycle = height;
+        // Production advances the vote manager on Tick; this harness injects
+        // events directly, so do it here. Without it the votes below are
+        // rejected as WrongCycle once a chain exists (bootstrap ±1 tolerance
+        // only applies before genesis), and every cycle tallies indeterminate.
+        engine.vote_mgr.set_current_cycle(height);
+        engine.tracked_phase = CyclePhase::Proposal;
+        // Strictly increasing timestamps across the chain (B5); still well
+        // inside the B6 future tolerance (300 s).
+        let (block, hash) = make_valid_block_full(
+            proposer.0,
+            proposer.1,
+            height,
+            prev,
+            wall_now() + height,
+            engine.chain_id,
+        );
+        let propose_out = engine.step(CycleEvent::BlockProposed { block, from_peer: b"p1".to_vec() });
+        assert!(
+            engine.candidate_tracker.get(&hash).is_some(),
+            "block {height} must be tracked as a candidate. propose logs: {}",
+            logs_of(&propose_out)
+        );
+        engine.tracked_phase = CyclePhase::Voting;
+        for (i, (sk, pk)) in voters.iter().enumerate() {
+            let vote = PorVote::sign(height, hash, sk, (*pk).clone()).unwrap();
+            engine.step(CycleEvent::VoteReceived { vote, from_peer: format!("p{i}").into_bytes() });
+        }
+        let out = engine.step(CycleEvent::CycleBoundary { completed_cycle: height });
+        (hash, out)
+    }
+
+    fn logs_of(outputs: &[CycleIo]) -> String {
+        outputs
+            .iter()
+            .filter_map(|o| match o {
+                CycleIo::Log(m) => Some(m.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    fn persists_finality(outputs: &[CycleIo]) -> bool {
+        outputs.iter().any(|o| matches!(o, CycleIo::PersistFinalityState { .. }))
+    }
+
+    fn persists_checkpoint(outputs: &[CycleIo]) -> bool {
+        outputs.iter().any(|o| matches!(o, CycleIo::PersistCheckpoint(_)))
+    }
+
+    /// An isolated node used to FINALIZE its own solo run after three cycles —
+    /// depth was the only condition — and finality is the one floor automatic
+    /// resolution never crosses. So the solo run became un-abandonable, and the
+    /// legitimacy hierarchy could never execute. Solo blocks still commit (the
+    /// hierarchy is not a minting ban) but they never enter the finality window.
+    #[test]
+    fn solo_blocks_never_finalize() {
+        let (vp1, vpub1) = make_validator();
+        let (vp2, vpub2) = make_validator();
+        let mut engine = make_engine(None, &[vpub1.clone(), vpub2.clone()], 2);
+        let mut prev = found_genesis_with_two_witnesses(&mut engine, (&vp1, &vpub1), (&vp2, &vpub2));
+
+        for h in 1..=5u64 {
+            let (hash, out) = commit_next(&mut engine, (&vp1, &vpub1), h, prev, &[(&vp1, &vpub1)]);
+            assert!(has_commit(&out), "solo block {h} still commits — hierarchy, not ban. logs: {}", logs_of(&out));
+            assert!(!persists_finality(&out), "a solo block must never advance finality (height {h})");
+            assert!(!persists_checkpoint(&out), "a solo block must never anchor a checkpoint (height {h})");
+            prev = hash;
+        }
+        assert_eq!(
+            engine.finality_tracker().finalized_height, 0,
+            "five solo commits must leave finality where the last WITNESSED block left it"
+        );
+    }
+
+    /// Control: the same chain, witnessed, finalizes as before.
+    #[test]
+    fn witnessed_blocks_still_finalize() {
+        let (vp1, vpub1) = make_validator();
+        let (vp2, vpub2) = make_validator();
+        let mut engine = make_engine(None, &[vpub1.clone(), vpub2.clone()], 2);
+        let mut prev = found_genesis_with_two_witnesses(&mut engine, (&vp1, &vpub1), (&vp2, &vpub2));
+        let mut any_finality = false;
+        for h in 1..=5u64 {
+            let (hash, out) =
+                commit_next(&mut engine, (&vp1, &vpub1), h, prev, &[(&vp1, &vpub1), (&vp2, &vpub2)]);
+            assert!(has_commit(&out), "witnessed block {h} commits. logs: {}", logs_of(&out));
+            any_finality |= persists_finality(&out);
+            prev = hash;
+        }
+        assert!(any_finality, "witnessed blocks must still advance finality");
+        assert!(engine.finality_tracker().finalized_height > 0);
+    }
+
+    /// A solo block in the middle of witnessed ones breaks the finality window
+    /// exactly like a skipped cycle: the run must restart on the far side.
+    #[test]
+    fn a_solo_block_breaks_the_finality_window_like_a_skipped_cycle() {
+        let (vp1, vpub1) = make_validator();
+        let (vp2, vpub2) = make_validator();
+        let mut engine = make_engine(None, &[vpub1.clone(), vpub2.clone()], 2);
+        let mut prev = found_genesis_with_two_witnesses(&mut engine, (&vp1, &vpub1), (&vp2, &vpub2));
+        let both: [(&NoblePrivateKey, &NoblePublicKey); 2] = [(&vp1, &vpub1), (&vp2, &vpub2)];
+        // 1,2 witnessed; 3 solo; 4,5 witnessed.
+        for h in 1..=2u64 { let (hash, _) = commit_next(&mut engine, (&vp1, &vpub1), h, prev, &both); prev = hash; }
+        let (hash, out) = commit_next(&mut engine, (&vp1, &vpub1), 3, prev, &[(&vp1, &vpub1)]);
+        assert!(has_commit(&out));
+        prev = hash;
+        let before = engine.finality_tracker().finalized_height;
+        for h in 4..=5u64 { let (hash, _) = commit_next(&mut engine, (&vp1, &vpub1), h, prev, &both); prev = hash; }
+        // Window is genesis,1,2 | (3 excluded) | 4,5 → the post-gap run is too
+        // short to finalize anything beyond what the pre-gap run already did.
+        assert_eq!(engine.finality_tracker().finalized_height, before.max(0));
+        assert!(
+            engine.finality_tracker().finalized_height < 3,
+            "nothing at or above the solo block may be finalized"
         );
     }
 

@@ -69,6 +69,23 @@ pub struct NetworkStats {
     pub median_clock_offset_ms: Option<i64>,
 }
 
+/// Verified legitimacy verdict on a peer's advertised chain tip (F3/F9).
+///
+/// Produced only from certificates this node fetched and verified itself.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TipLegitimacy {
+    /// The tip the verdict is about (hex).
+    pub tip_hash: String,
+    /// `witnessed`, `self_voted`, `not_contesting`, or `unknown`.
+    pub label: String,
+    /// Witnessed segments: witnesses on the least-witnessed block.
+    pub weakest_witnesses: Option<u64>,
+    /// Distinct validators participating across the segment.
+    pub coverage: Option<u64>,
+    /// Self-voted segments: first under-witnessed height.
+    pub first_solo_height: Option<u64>,
+}
+
 /// Metadata about a connected peer, maintained by the node event loop.
 #[derive(Debug, Clone)]
 pub struct PeerInfoEntry {
@@ -108,6 +125,9 @@ pub struct PeerInfoEntry {
     pub chain_id: Option<u32>,
     /// Peer's minimum fee rate preference (groats/byte, from NodeAnnounce).
     pub min_fee_rate: Option<u64>,
+    /// F3: verdict on this peer's advertised tip, once assessed from its
+    /// certificates. `None` until then.
+    pub tip_legitimacy: Option<TipLegitimacy>,
 }
 
 /// Shared state available to all RPC method handlers.

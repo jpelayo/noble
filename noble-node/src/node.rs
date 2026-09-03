@@ -810,19 +810,90 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
             }
         }
+        // F1: the rollback floor is WITNESSED finality. A persisted finality or
+        // checkpoint record whose anchor block has fewer than min_unique_voters
+        // verified witnesses is not a floor — chains that finalized solo blocks
+        // under the old depth-only rule are repaired here, by the algorithm,
+        // rather than left for a person. The lowered floor is what lets a
+        // self-voted segment be abandoned later without any operator step.
+        //
+        // SNAPSHOT-AND-DROP: every storage read below completes into an owned
+        // value before the next one is taken. A `storage.read()` in an `if let`
+        // scrutinee stays alive for the whole body, so reading again inside is a
+        // recursive same-rank acquire — which the lock tracker panics on.
+        let required_witnesses = build_consensus_config(config).min_unique_voters;
+
         // Restore finality state from storage.
-        if let Ok(Some(data)) = storage.read().load_finality_state() {
-            if let Some((height, hash, cycle)) = decode_finality_state(&data) {
-                engine.restore_finality(height, hash, cycle);
-                tracing::info!(task = "init", finalized_height = height, "restored finality state");
+        let persisted_finality = {
+            let st = storage.read();
+            st.load_finality_state().ok().flatten()
+        };
+        if let Some((height, hash, cycle)) =
+            persisted_finality.as_deref().and_then(decode_finality_state)
+        {
+            let witnessed = {
+                let st = storage.read();
+                crate::healing::highest_witnessed_at_or_below(&*st, height, required_witnesses)
+            };
+            match witnessed {
+                Some(h) if h == height => {
+                    engine.restore_finality(height, hash, cycle);
+                    tracing::info!(task = "init", finalized_height = height, "restored finality state");
+                }
+                Some(h) => {
+                    let repaired_hash = {
+                        let st = storage.read();
+                        st.get_block_hash_by_height(h).unwrap_or(Hash256::ZERO)
+                    };
+                    tracing::warn!(
+                        task = "init",
+                        persisted = height,
+                        witnessed = h,
+                        "persisted finality anchors on an under-witnessed block — lowering the \
+                         floor to the highest witnessed block; solo blocks are never finalized"
+                    );
+                    engine.restore_finality(h, repaired_hash, cycle);
+                }
+                None => {
+                    tracing::warn!(
+                        task = "init",
+                        persisted = height,
+                        "persisted finality has no witnessed anchor at or below it — starting \
+                         with no finality floor"
+                    );
+                }
             }
         }
-        // Restore checkpoint state from storage.
-        if let Ok(entries) = storage.read().load_checkpoints() {
-            let cps: Vec<noble_consensus::Checkpoint> = entries
+
+        // Restore checkpoint state from storage — same filter: a checkpoint on a
+        // solo block is not a floor.
+        let checkpoint_entries = {
+            let st = storage.read();
+            st.load_checkpoints().unwrap_or_default()
+        };
+        if !checkpoint_entries.is_empty() {
+            let decoded: Vec<noble_consensus::Checkpoint> = checkpoint_entries
                 .iter()
                 .filter_map(|(_, data)| noble_codec::NobleCbor::from_cbor(data).ok())
                 .collect();
+            let before = decoded.len();
+            let cps: Vec<noble_consensus::Checkpoint> = {
+                let st = storage.read();
+                decoded
+                    .into_iter()
+                    .filter(|cp| {
+                        crate::healing::block_is_witnessed(&*st, cp.height, required_witnesses)
+                    })
+                    .collect()
+            };
+            let dropped = before - cps.len();
+            if dropped > 0 {
+                tracing::warn!(
+                    task = "init",
+                    dropped,
+                    "discarded checkpoint(s) anchored on under-witnessed blocks"
+                );
+            }
             if !cps.is_empty() {
                 let count = cps.len();
                 engine.restore_checkpoints(cps);
@@ -3454,6 +3525,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             last_ban_reason: None,
                             chain_id: None, // set when NodeAnnounce received
                             min_fee_rate: None, // set when NodeAnnounce received
+                            tip_legitimacy: None, // set when the tip is assessed (F3)
                         },
                     );
                 }
@@ -4171,6 +4243,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         tracing::debug!(task = "broadcast", "block_received event dropped (no subscribers): {e}");
                     }
                 }
+                // F3: blocks fetched to ASSESS a rival segment are evidence, not
+                // imports. They have no local parent, so any later routing would
+                // send them to try_sync_import, fail B2 as ChainMismatch, and fire
+                // the very adoption path being gated. Intercept first.
+                if self.healing.is_assessment_block(peer_id, block.header.height) {
+                    self.healing.assess_block(peer_id, block, vote_data.as_deref());
+                    return;
+                }
+
                 let (tip_height, have_chain) = {
                     let engine = self.consensus.read();
                     (engine.chain_tip().0, engine.has_chain())
