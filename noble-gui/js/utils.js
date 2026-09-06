@@ -103,6 +103,10 @@ const MONO_FONTS = {
   roboto:    { label: 'Roboto Mono',    stack: "'Roboto Mono', 'SF Mono', Menlo, monospace" },
   geist:     { label: 'Geist Mono',     stack: "'Geist Mono', 'SF Mono', Menlo, monospace" },
   charon:    { label: 'Iosevka Charon', stack: "'Iosevka Charon', 'SF Mono', Menlo, monospace" },
+  // Only family here carrying U+202F, so the `narrow` separator is actually
+  // narrow in every engine under it. Cost: hex a-f are narrower than digits,
+  // so hash columns lose alignment.
+  aile:      { label: 'Iosevka Aile',   stack: "'Iosevka Aile', 'SF Mono', Menlo, monospace" },
 };
 const MONO_FONT_KEY = 'noble-mono-font';
 const MONO_FONT_DEFAULT = 'jetbrains';

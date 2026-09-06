@@ -178,6 +178,28 @@
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
+/* Iosevka Aile — quasi-proportional. Shipped unsubsetted (Fontsource provides no
+   smaller subset), which is why it is far larger than the others; a browser only
+   downloads it if it is the selected family. It is the one family here that
+   carries U+202F (at 0.200em vs its 0.450em space), so the `narrow` thousands
+   separator renders narrow in every engine under this font — including Firefox,
+   which otherwise falls back to the default monospace at full cell width.
+   Digits are uniform; hex a-f are narrower, so hash columns do not align. */
+@font-face {
+  font-family: 'Iosevka Aile';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../vendor/fonts/IosevkaAile-400-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Iosevka Aile';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('../vendor/fonts/IosevkaAile-700-latin.woff2') format('woff2');
+}
+
 /* ── Light theme (default) ── */
 :root {
   /* Backgrounds */
