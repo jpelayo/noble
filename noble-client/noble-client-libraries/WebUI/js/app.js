@@ -1,6 +1,6 @@
 // NOBLE Document Client — Router & State Controller
 import { Bridge, Prefs } from './bridge.js';
-import { isWryPlatform, setThousandsSeparator, getThousandsSeparatorId, THEME_KEY } from './utils.js';
+import { isWryPlatform, setThousandsSeparator, getThousandsSeparatorId, applyMonoFont, THEME_KEY } from './utils.js';
 import { emptyState } from './components/empty-state.js';
 import { init as initHome } from './pages/home.js';
 import { init as initDocuments } from './pages/documents.js';
@@ -36,6 +36,8 @@ window.applyTheme = function(theme) {
 await Prefs.hydrate();
 // utils.js cached the separator at module init (before hydration) — re-sync.
 setThousandsSeparator(getThousandsSeparatorId());
+// Same reason: the font choice is only readable once Prefs has restored it.
+applyMonoFont();
 
 // Apply saved theme immediately (before first render)
 const savedTheme = localStorage.getItem(THEME_KEY) || 'system';

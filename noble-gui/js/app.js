@@ -16,7 +16,12 @@ const _m = (path) => `${path}?v=${_v}`;
 
 const { createStore } = await import(_m('./state.js'));
 const { Router } = await import(_m('./router.js'));
-const { formatNumber, formatChainLabel } = await import(_m('./utils.js'));
+const { formatNumber, formatChainLabel, applyMonoFont } = await import(_m('./utils.js'));
+
+// Apply the saved monospace font before any page renders. Done here rather
+// than in an inline <head> script so MONO_FONTS in utils.js stays the single
+// source of truth for the stacks.
+applyMonoFont();
 
 // ── Pages (dynamic imports with cache busting) ──
 const [

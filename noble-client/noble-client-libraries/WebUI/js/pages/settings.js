@@ -6,7 +6,8 @@ import { statusBadge } from '../components/status-badge.js';
 import { renderQR } from '../components/qr-code.js';
 import { openModal } from '../components/modal.js';
 import { promptP12Password } from '../components/p12-password.js';
-import { esc, escAttr, isWryPlatform, groupThousands, setThousandsSeparator, getThousandsSeparatorId, THEME_KEY } from '../utils.js';
+import { esc, escAttr, isWryPlatform, groupThousands, setThousandsSeparator, getThousandsSeparatorId,
+         getMonoFontId, monoFontOptions, monoFontStack, setMonoFont, THEME_KEY } from '../utils.js';
 
 /** Human label for where private keys live, per platform. */
 function walletStorageLabel(platform) {
@@ -109,6 +110,8 @@ export function init(root, ctx) {
             ['dot', 'Dot — 205.120.00'],
             ['none', 'None — 205120.00'],
         ];
+        const currentFont = getMonoFontId();
+        const fontOptions = monoFontOptions();
         const card = document.createElement('div');
         card.className = 'panel';
         card.innerHTML = `
@@ -136,6 +139,20 @@ export function init(root, ctx) {
                         ).join('')}
                     </select>
                 </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-top:var(--gap)">
+                    <div>
+                        <div style="font-size:var(--font-size-sm);font-weight:500">Monospace font</div>
+                        <div style="font-size:var(--font-size-xs);color:var(--text-muted)">Typeface for amounts, hashes and addresses</div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:var(--gap-sm)">
+                        <span id="mono-font-example" style="font-size:var(--font-size-xs);color:var(--text-muted);font-family:${escAttr(monoFontStack(currentFont))}">${esc(groupThousands('1234567'))} \u00b7 abcdef</span>
+                        <select class="input input-sm" id="mono-font" aria-label="Monospace font" style="max-width:230px">
+                            ${fontOptions.map(([id, label]) =>
+                                `<option value="${id}" ${id === currentFont ? 'selected' : ''}>${esc(label)}</option>`
+                            ).join('')}
+                        </select>
+                    </div>
+                </div>
             </div>
         `;
         root.appendChild(card);
@@ -156,6 +173,14 @@ export function init(root, ctx) {
             // reflect the choice immediately; other pages pick it up on their
             // next poll tick or remount.
             render();
+        });
+
+        // Font choice only swaps --font-mono on <html>, so every mounted page
+        // repaints without a re-render; only the local preview needs repainting.
+        card.querySelector('#mono-font').addEventListener('change', (e) => {
+            setMonoFont(e.target.value);
+            const ex = card.querySelector('#mono-font-example');
+            if (ex) ex.style.fontFamily = monoFontStack(e.target.value);
         });
     }
 

@@ -3,7 +3,8 @@
  * IP access control management and system configuration.
  */
 
-import { formatChainLabel, formatFee, groupThousands, setThousandsSeparator, getThousandsSeparatorId } from '../utils.js';
+import { formatChainLabel, formatFee, groupThousands, setThousandsSeparator, getThousandsSeparatorId,
+         getMonoFontId, monoFontOptions, monoFontStack, setMonoFont } from '../utils.js';
 
 export function init(root, ctx) {
   const { rpc } = ctx;
@@ -480,6 +481,16 @@ export function init(root, ctx) {
             <span class="mono" id="s-thousands-example" style="font-size:var(--font-size-sm);color:var(--text-muted)"></span>
           </div>
         </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:var(--gap);flex-wrap:wrap;margin-top:var(--gap)">
+          <div>
+            <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 2px">Monospace font</p>
+            <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0">Typeface for heights, hashes, addresses and every other fixed-width value</p>
+          </div>
+          <div style="display:flex;align-items:center;gap:var(--gap)">
+            <select id="s-mono-font" style="padding:6px 10px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:var(--font-size-sm)"></select>
+            <span id="s-mono-example" style="font-size:var(--font-size-sm);color:var(--text-muted)"></span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -533,6 +544,30 @@ export function init(root, ctx) {
       // Live example updates now; the rest of the dashboard repaints on its
       // next WS/poll tick (seconds).
       paintExample();
+    });
+  }
+
+  // ── Display: monospace font ──
+  // Faces are vendored (vendor/fonts/) and declared in themes.css. Choosing one
+  // only swaps --font-mono on <html>, so every rule reading it repaints at once.
+  {
+    const fontSelect = root.querySelector('#s-mono-font');
+    const fontExample = root.querySelector('#s-mono-example');
+    const currentFont = getMonoFontId();
+    fontSelect.innerHTML = monoFontOptions()
+      .map(([id, label]) => `<option value="${id}" ${id === currentFont ? 'selected' : ''}>${label}</option>`)
+      .join('');
+    // Preview is rendered in the highlighted font, not the active one, so the
+    // difference is visible before committing. Digits + hex in both cases show
+    // whether the family keeps table columns aligned.
+    const paintFont = () => {
+      fontExample.style.fontFamily = monoFontStack(fontSelect.value);
+      fontExample.textContent = `${groupThousands('1234567')} \u00b7 0x34E9E7A4 \u00b7 abcdef`;
+    };
+    paintFont();
+    fontSelect.addEventListener('change', () => {
+      setMonoFont(fontSelect.value);
+      paintFont();
     });
   }
 

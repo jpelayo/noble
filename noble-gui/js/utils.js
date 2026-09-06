@@ -89,6 +89,53 @@ export function getThousandsSeparatorId() {
   return stored in THOUSANDS_SEPS ? stored : 'space';
 }
 
+// ── Monospace font (user preference) ──
+// Faces are vendored under vendor/fonts/ and declared in css/themes.css, so the
+// dashboard renders identically everywhere instead of falling through to
+// whatever mono font the OS happens to supply. Stored as a semantic ID; the
+// stack is applied by overriding --font-mono on <html>, which every rule
+// reading var(--font-mono) inherits.
+// Iosevka Charon is quasi-proportional: digits and hex (0-9 a-f A-F) are all
+// 0.5em so tables and hashes stay column-aligned, while prose letters vary.
+const MONO_FONTS = {
+  jetbrains: { label: 'JetBrains Mono', stack: "'JetBrains Mono', 'SF Mono', Menlo, monospace" },
+  plex:      { label: 'IBM Plex Mono',  stack: "'IBM Plex Mono', 'SF Mono', Menlo, monospace" },
+  roboto:    { label: 'Roboto Mono',    stack: "'Roboto Mono', 'SF Mono', Menlo, monospace" },
+  geist:     { label: 'Geist Mono',     stack: "'Geist Mono', 'SF Mono', Menlo, monospace" },
+  charon:    { label: 'Iosevka Charon', stack: "'Iosevka Charon', 'SF Mono', Menlo, monospace" },
+};
+const MONO_FONT_KEY = 'noble-mono-font';
+const MONO_FONT_DEFAULT = 'jetbrains';
+
+/** Current monospace choice ID (unknown/missing IDs fall back to the default). */
+export function getMonoFontId() {
+  const stored = localStorage.getItem(MONO_FONT_KEY);
+  return stored && stored in MONO_FONTS ? stored : MONO_FONT_DEFAULT;
+}
+
+/** [id, label] pairs, for building settings controls. */
+export function monoFontOptions() {
+  return Object.entries(MONO_FONTS).map(([id, f]) => [id, f.label]);
+}
+
+/** CSS stack for a choice ID (or the current choice when omitted). */
+export function monoFontStack(id) {
+  return (MONO_FONTS[id] || MONO_FONTS[getMonoFontId()]).stack;
+}
+
+/** Persist + apply a monospace font choice. Takes effect immediately. */
+export function setMonoFont(id) {
+  if (!(id in MONO_FONTS)) id = MONO_FONT_DEFAULT;
+  localStorage.setItem(MONO_FONT_KEY, id);
+  applyMonoFont(id);
+}
+
+/** Apply the stored (or given) choice to the document. Call once at boot. */
+export function applyMonoFont(id) {
+  const choice = id && id in MONO_FONTS ? id : getMonoFontId();
+  document.documentElement.style.setProperty('--font-mono', MONO_FONTS[choice].stack);
+}
+
 /** Group the integer part of a number with the user's thousands separator
  *  (default: space — locale-independent). Keeps any decimal part and sign:
  *  205120 → "205 120", -1234.56 → "-1 234.56". */
