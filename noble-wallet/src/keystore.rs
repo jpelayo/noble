@@ -97,6 +97,8 @@ pub enum KeyScheme {
     TotpSecret         = 0x84,
     /// Faucet authentication passphrase.
     FaucetPassphrase   = 0x85,
+    /// Faucet admin bearer token: [8-byte LE timestamp][32 token bytes].
+    FaucetAdminToken   = 0x86,
 }
 
 impl KeyScheme {
@@ -109,6 +111,7 @@ impl KeyScheme {
             0x83 => Ok(Self::TlsKey),
             0x84 => Ok(Self::TotpSecret),
             0x85 => Ok(Self::FaucetPassphrase),
+            0x86 => Ok(Self::FaucetAdminToken),
             other => Err(WalletError::UnsupportedScheme(other)),
         }
     }
@@ -849,6 +852,7 @@ impl KeyStore {
             KeyScheme::TlsKey => NoblePrivateKey::TlsKey(raw_bytes.to_vec()),
             KeyScheme::TotpSecret => NoblePrivateKey::TotpSecret(raw_bytes.to_vec()),
             KeyScheme::FaucetPassphrase => NoblePrivateKey::FaucetPassphrase(raw_bytes.to_vec()),
+            KeyScheme::FaucetAdminToken => NoblePrivateKey::FaucetAdminToken(raw_bytes.to_vec()),
             _ => return Err(WalletError::UnsupportedScheme(scheme_id)),
         };
 
@@ -1012,6 +1016,9 @@ impl KeyStore {
                 KeyScheme::TotpSecret => NoblePrivateKey::TotpSecret(secret.clone()),
                 KeyScheme::FaucetPassphrase => {
                     NoblePrivateKey::FaucetPassphrase(secret.clone())
+                }
+                KeyScheme::FaucetAdminToken => {
+                    NoblePrivateKey::FaucetAdminToken(secret.clone())
                 }
             };
 
@@ -1422,6 +1429,9 @@ fn priv_key_from_entry(entry: &KeyEntry) -> Result<NoblePrivateKey, WalletError>
         KeyScheme::FaucetPassphrase => {
             Ok(NoblePrivateKey::FaucetPassphrase(entry.secret.clone()))
         }
+        KeyScheme::FaucetAdminToken => {
+            Ok(NoblePrivateKey::FaucetAdminToken(entry.secret.clone()))
+        }
     }
 }
 
@@ -1468,8 +1478,8 @@ fn now_unix() -> u64 {
 mod tests {
     use super::*;
     use noble_crypto::{
-        sha256, SCHEME_P2P_IDENTITY, SCHEME_TLS_KEY, SCHEME_TOTP_SECRET,
-        SCHEME_VALIDATOR_SECP256K1,
+        sha256, SCHEME_FAUCET_ADMIN_TOKEN, SCHEME_P2P_IDENTITY, SCHEME_SECP256K1, SCHEME_TLS_KEY,
+        SCHEME_TOTP_SECRET, SCHEME_VALIDATOR_SECP256K1,
     };
     use tempfile::tempdir;
 
@@ -1855,6 +1865,66 @@ mod tests {
 
         let got = ks.get_raw(SCHEME_VALIDATOR_SECP256K1).unwrap();
         assert_eq!(got, sk);
+    }
+
+    #[test]
+    fn store_raw_faucet_admin_token_round_trips() {
+        // The node writes [8-byte LE timestamp][32 token bytes] under 0x86 at
+        // every boot (ensure_faucet_admin_token). Before KeyScheme learned
+        // 0x86 this failed with UnsupportedScheme on every call, so the faucet
+        // admin token was never persisted and the faucet's admin endpoints
+        // answered 503 for the life of the node.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("keystore.noble");
+        let meta = test_chain_meta();
+        let pass = test_passphrase(&meta);
+
+        let mut ks = KeyStore::create(&path, &meta).unwrap();
+        ks.unlock(&pass).unwrap();
+
+        let mut stored = Vec::with_capacity(40);
+        stored.extend_from_slice(&1_700_000_000u64.to_le_bytes());
+        stored.extend_from_slice(&[0xABu8; 32]);
+
+        ks.store_raw(SCHEME_FAUCET_ADMIN_TOKEN, &stored, &pass)
+            .unwrap();
+        assert!(ks.has_scheme(SCHEME_FAUCET_ADMIN_TOKEN).unwrap());
+        assert_eq!(ks.get_raw(SCHEME_FAUCET_ADMIN_TOKEN).unwrap(), stored);
+
+        // Rotation is delete + store; both halves must accept the scheme.
+        ks.delete_by_scheme(SCHEME_FAUCET_ADMIN_TOKEN);
+        assert!(!ks.has_scheme(SCHEME_FAUCET_ADMIN_TOKEN).unwrap());
+
+        // Survives a lock/reopen cycle — the serde Deserialize path also
+        // resolves the byte through KeyScheme::from_u8.
+        ks.store_raw(SCHEME_FAUCET_ADMIN_TOKEN, &stored, &pass)
+            .unwrap();
+        drop(ks);
+        let mut reopened = KeyStore::open(&path, &meta).unwrap();
+        reopened.unlock(&pass).unwrap();
+        assert_eq!(
+            reopened.get_raw(SCHEME_FAUCET_ADMIN_TOKEN).unwrap(),
+            stored
+        );
+    }
+
+    #[test]
+    fn keyscheme_covers_every_internal_scheme_noble_crypto_recognizes() {
+        // Drift guard. SCHEME_* in noble-crypto and KeyScheme here are two
+        // authorities over one table; 0x86 was added to the first and not the
+        // second, and nothing caught it. Any future 0x87 fails here instead of
+        // silently breaking a store_raw call at runtime.
+        //
+        // Internal range only: 0x02/0x03 are on-chain signing schemes, and
+        // 0x03 (BIP137) is deliberately never a keystore entry.
+        for id in 0x80u8..=0xFF {
+            assert_eq!(
+                KeyScheme::from_u8(id).is_ok(),
+                noble_crypto::is_recognized_scheme(id),
+                "scheme {id:#04x}: noble-crypto and KeyScheme disagree"
+            );
+        }
+        assert!(KeyScheme::from_u8(SCHEME_SECP256K1).is_ok());
     }
 
     #[cfg(unix)]

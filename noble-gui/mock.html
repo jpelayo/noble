@@ -11,6 +11,19 @@
     window.__v = Date.now();
     window.__noble_v = window.__v;
     window.NOBLE_VERSION = '0.75.0-mock';
+    window.NOBLE_THEME_KEY = 'noble-theme';
+    // Apply the saved theme synchronously, before first paint. initTheme() in
+    // app.js runs only after ~20 awaited page imports, so without this a
+    // light-theme user sees a fully dark dashboard on every load until boot
+    // finishes, which reads as "the theme was not saved".
+    (function () {
+      var t;
+      try { t = localStorage.getItem(window.NOBLE_THEME_KEY); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    })();
   </script>
 </head>
 <body>

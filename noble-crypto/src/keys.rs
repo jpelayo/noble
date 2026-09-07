@@ -10,7 +10,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::CryptoError;
 use crate::schemes::{
-    SCHEME_FAUCET_PASSPHRASE, SCHEME_P2P_IDENTITY, SCHEME_SECP256K1,
+    SCHEME_FAUCET_ADMIN_TOKEN, SCHEME_FAUCET_PASSPHRASE, SCHEME_P2P_IDENTITY, SCHEME_SECP256K1,
     SCHEME_TLS_KEY, SCHEME_TOTP_SECRET, SCHEME_VALIDATOR_SECP256K1,
 };
 use crate::secp256k1;
@@ -46,6 +46,8 @@ pub enum NoblePrivateKey {
     TotpSecret(Vec<u8>),
     /// Faucet keystore passphrase — raw bytes (0x85).
     FaucetPassphrase(Vec<u8>),
+    /// Faucet admin bearer token — [8-byte LE timestamp][32 token bytes] (0x86).
+    FaucetAdminToken(Vec<u8>),
 }
 
 impl std::fmt::Debug for NoblePrivateKey {
@@ -57,6 +59,7 @@ impl std::fmt::Debug for NoblePrivateKey {
             Self::TlsKey(_) => "TlsKey",
             Self::TotpSecret(_) => "TotpSecret",
             Self::FaucetPassphrase(_) => "FaucetPassphrase",
+            Self::FaucetAdminToken(_) => "FaucetAdminToken",
         };
         write!(f, "NoblePrivateKey::{variant}([REDACTED])")
     }
@@ -73,6 +76,7 @@ impl NoblePrivateKey {
             Self::TlsKey(sk) => Self::TlsKey(sk.clone()),
             Self::TotpSecret(sk) => Self::TotpSecret(sk.clone()),
             Self::FaucetPassphrase(sk) => Self::FaucetPassphrase(sk.clone()),
+            Self::FaucetAdminToken(sk) => Self::FaucetAdminToken(sk.clone()),
         }
     }
 }
@@ -160,6 +164,7 @@ impl NoblePrivateKey {
             Self::TlsKey(_) => SCHEME_TLS_KEY,
             Self::TotpSecret(_) => SCHEME_TOTP_SECRET,
             Self::FaucetPassphrase(_) => SCHEME_FAUCET_PASSPHRASE,
+            Self::FaucetAdminToken(_) => SCHEME_FAUCET_ADMIN_TOKEN,
         }
     }
 
@@ -219,7 +224,11 @@ impl NoblePrivateKey {
                     .expect("checked by try_public_key before reaching here");
                 NoblePublicKey::Secp256k1(signing_key.verifying_key().to_sec1_bytes().to_vec())
             }
-            Self::P2pIdentity(raw) | Self::TlsKey(raw) | Self::TotpSecret(raw) | Self::FaucetPassphrase(raw) => {
+            Self::P2pIdentity(raw)
+            | Self::TlsKey(raw)
+            | Self::TotpSecret(raw)
+            | Self::FaucetPassphrase(raw)
+            | Self::FaucetAdminToken(raw) => {
                 // Synthetic: SHA-256 of raw bytes → secp256k1 pubkey, used as keystore filename only.
                 let hash = crate::sha256(raw);
                 let sk = k256::ecdsa::SigningKey::from_slice(&hash.0)
@@ -238,7 +247,8 @@ impl NoblePrivateKey {
             Self::P2pIdentity(b)
             | Self::TlsKey(b)
             | Self::TotpSecret(b)
-            | Self::FaucetPassphrase(b) => Some(b),
+            | Self::FaucetPassphrase(b)
+            | Self::FaucetAdminToken(b) => Some(b),
         }
     }
 }
@@ -261,7 +271,11 @@ impl NobleSigner for NoblePrivateKey {
         let (sig_scheme_id, signature) = match self {
             Self::Secp256k1(sk) => (SCHEME_SECP256K1, secp256k1::sign(sk, message)?),
             Self::ValidatorSecp256k1(sk) => (SCHEME_SECP256K1, secp256k1::sign(sk, message)?),
-            Self::P2pIdentity(_) | Self::TlsKey(_) | Self::TotpSecret(_) | Self::FaucetPassphrase(_) => {
+            Self::P2pIdentity(_)
+            | Self::TlsKey(_)
+            | Self::TotpSecret(_)
+            | Self::FaucetPassphrase(_)
+            | Self::FaucetAdminToken(_) => {
                 return Err(CryptoError::VerificationFailed(
                     "non-signing key type cannot produce signatures".to_string(),
                 ));

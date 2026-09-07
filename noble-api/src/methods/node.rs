@@ -2489,3 +2489,57 @@ where
     rotate_faucet_admin_token_with(&state.wallet_keystore, &state.chain_meta)
         .map_err(ApiError::Internal)
 }
+
+#[cfg(test)]
+mod faucet_admin_token_tests {
+    use super::*;
+    use crate::lock_order::{LockOrder, TrackedMutex};
+    use noble_wallet::KeyStore;
+    use tempfile::tempdir;
+
+    /// Build an unlocked keystore behind the same TrackedMutex the node uses.
+    fn keystore_fixture(chain_meta: &[u8; 32]) -> (tempfile::TempDir, TrackedMutex<KeyStore>) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("keystore.noble");
+        // create_for_faucet is the public wrapper over the crate-private
+        // create(); apt here, since this keystore holds the faucet's token.
+        let ks = KeyStore::create_for_faucet(&path, chain_meta).unwrap();
+        (dir, TrackedMutex::new(LockOrder::WalletKeystore, ks))
+    }
+
+    #[test]
+    fn admin_token_is_created_once_and_then_read_back() {
+        // Before KeyScheme learned 0x86 this returned
+        // "store admin token: unsupported scheme: 0x86" on every call, so a
+        // fresh token was minted and discarded at every node boot.
+        let chain_meta = [0x42u8; 32];
+        let (_dir, ks) = keystore_fixture(&chain_meta);
+
+        let (token_a, ts_a, fp_a) =
+            read_or_create_faucet_admin_token_with(&ks, &chain_meta).expect("bootstrap");
+        assert_eq!(token_a.len(), 64, "32 raw bytes, hex-encoded");
+
+        let (token_b, ts_b, fp_b) =
+            read_or_create_faucet_admin_token_with(&ks, &chain_meta).expect("read back");
+        assert_eq!(token_a, token_b, "second call must not mint a new token");
+        assert_eq!((ts_a, fp_a), (ts_b, fp_b));
+    }
+
+    #[test]
+    fn rotate_replaces_the_stored_token() {
+        let chain_meta = [0x42u8; 32];
+        let (_dir, ks) = keystore_fixture(&chain_meta);
+
+        let (before, _, _) =
+            read_or_create_faucet_admin_token_with(&ks, &chain_meta).expect("bootstrap");
+        let (rotated, _, _) =
+            rotate_faucet_admin_token_with(&ks, &chain_meta).expect("rotate");
+        assert_ne!(before, rotated, "rotation must mint a new token");
+
+        // Delete + store is atomic from the caller's view: the new value is
+        // what a subsequent read returns.
+        let (after, _, _) =
+            read_or_create_faucet_admin_token_with(&ks, &chain_meta).expect("read back");
+        assert_eq!(rotated, after);
+    }
+}

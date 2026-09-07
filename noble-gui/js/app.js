@@ -177,15 +177,18 @@ subscribe('connectionStatus', (status) => {
 // ── Theme toggle ──
 const themeToggle = document.getElementById('theme-toggle');
 const html = document.documentElement;
+// Set by the pre-paint script in index.html; the literal is the fallback for
+// any shell that lacks it, so the key can never resolve to undefined.
+const THEME_KEY = window.NOBLE_THEME_KEY || 'noble-theme';
 
 function applyTheme(theme) {
   html.setAttribute('data-theme', theme);
-  localStorage.setItem('noble-theme', theme);
+  localStorage.setItem(THEME_KEY, theme);
   themeToggle.textContent = theme === 'dark' ? 'Light' : 'Dark';
 }
 
 function initTheme() {
-  const saved = localStorage.getItem('noble-theme');
+  const saved = localStorage.getItem(THEME_KEY);
   if (saved) {
     applyTheme(saved);
   } else {
