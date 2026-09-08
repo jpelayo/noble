@@ -1761,9 +1761,10 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                 ForkEntry {
                     is_local,
                     legitimacy: tl.map(|t| t.label.clone()),
-                    weakest_witnesses: tl.and_then(|t| t.weakest_witnesses),
-                    coverage: tl.and_then(|t| t.coverage),
-                    first_solo_height: tl.and_then(|t| t.first_solo_height),
+                    fully_witnessed: tl.and_then(|t| t.fully_witnessed),
+                    length: tl.and_then(|t| t.length),
+                    votes: tl.and_then(|t| t.votes),
+                    participation: tl.and_then(|t| t.participation),
                     tip_hash,
                     height,
                     peers,

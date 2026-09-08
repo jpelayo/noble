@@ -493,7 +493,9 @@ export function init(root, ctx) {
     fork_detected:          '\u26a0',  // warning triangle
     fork_aligned:           '\u2713',  // checkmark
     fork_divergence:        '\u2195',  // up-down arrow
-    fork_auto_resolved:     '\u21c4',  // right-left arrows
+    fork_auto_resolved:     '\u21c4',  // right-left arrows (legacy)
+    chain_adopted:          '\u21c4',  // right-left arrows
+    adoption_failed:        '\u26a0',  // warning
     fork_alignment_pending: '\u21c4',  // right-left arrows
     fork_alignment_clear:   '\u2713',  // checkmark
     alignment_changed:      '\u25c9',  // fisheye (alignment state)
@@ -539,6 +541,8 @@ export function init(root, ctx) {
       case 'fork_aligned': return 'var(--success, #22c55e)';
       case 'fork_divergence': return '#f59e0b';
       case 'fork_auto_resolved': return 'var(--danger, #ef4444)';
+      case 'chain_adopted': return 'var(--danger, #ef4444)';
+      case 'adoption_failed': return '#f59e0b';
       case 'fork_alignment_pending': return '#f59e0b';
       case 'fork_alignment_clear': return 'var(--success, #22c55e)';
       case 'alignment_changed': return '#60a5fa';
@@ -663,6 +667,10 @@ export function init(root, ctx) {
         return `Fork alignment cleared \u2014 no dominant fork`;
       case 'fork_auto_resolved':
         return `Fork auto-resolved \u2192 rollback to height ${data.rollback_height ?? 0}, target ${data.target_height} (${data.reason})`;
+      case 'chain_adopted':
+        return `Adopted the winning chain \u2192 height ${data.to_height} (from ${data.from_height}, ancestor ${data.ancestor}; ${data.discarded} replaced, ${data.reanchored} tx re-anchored${data.dropped ? `, ${data.dropped} dropped` : ''})`;
+      case 'adoption_failed':
+        return `Adoption ${data.stage} failed \u2014 ${data.reason}${data.applied != null ? ` (applied ${data.applied}, at ${data.at_height})` : ''}`;
       case 'chain_adoption_started':
         return `Chain adoption \u2192 ${data.target_chain_id} (${data.reason})`;
       case 'checkpoints_activated':

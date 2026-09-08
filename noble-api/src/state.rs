@@ -76,14 +76,16 @@ pub struct NetworkStats {
 pub struct TipLegitimacy {
     /// The tip the verdict is about (hex).
     pub tip_hash: String,
-    /// `witnessed`, `self_voted`, `not_contesting`, or `unknown`.
+    /// `witnessed`, `under_witnessed`, or `unknown`.
     pub label: String,
-    /// Witnessed segments: witnesses on the least-witnessed block.
-    pub weakest_witnesses: Option<u64>,
-    /// Distinct validators participating across the segment.
-    pub coverage: Option<u64>,
-    /// Self-voted segments: first under-witnessed height.
-    pub first_solo_height: Option<u64>,
+    /// Every block in the segment carries ≥ `min_unique_voters` verified signers.
+    pub fully_witnessed: Option<bool>,
+    /// Blocks above the common ancestor.
+    pub length: Option<u64>,
+    /// Σ verified witness signatures across the segment.
+    pub votes: Option<u64>,
+    /// Distinct keys appearing as signer or proposer.
+    pub participation: Option<u64>,
 }
 
 /// Metadata about a connected peer, maintained by the node event loop.

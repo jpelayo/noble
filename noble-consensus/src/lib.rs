@@ -29,7 +29,7 @@ pub use checkpoint::{Checkpoint, CheckpointManager};
 pub use fork_resolver::{
     CrossChainDecision, CrossChainForkInfo, ForkDecision, ForkInfo,
     ForkResolutionStrategy, ForkResolver, decay_vote_weight,
-    CHAIN_OWNER_EDGE_BLOCKS, Grade, SegmentLegitimacy, SoloGrade,
+    CHAIN_OWNER_EDGE_BLOCKS, Legitimacy, SegmentLegitimacy,
 };
 pub use badge::{
     BadgeProposal, BadgeProposalType, BadgeStatus, BadgeStore, RevocationReason,

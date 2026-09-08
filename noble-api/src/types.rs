@@ -1740,19 +1740,22 @@ pub struct ForkEntry {
     /// `false` = different block hash (diverged chain).
     /// `None` = cannot verify (height beyond local chain, or lookup error).
     pub agrees_with_local: Option<bool>,
-    /// F9: verified legitimacy of this fork's segment — `witnessed`,
-    /// `self_voted`, `not_contesting`, or `unknown` (not yet assessed).
+    /// Verified legitimacy of this fork's segment — `witnessed`,
+    /// `under_witnessed`, or `unknown` (not yet assessed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub legitimacy: Option<String>,
-    /// Witnessed forks: witnesses on the least-witnessed block.
+    /// Every block carries ≥ `min_unique_voters` verified signers.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub weakest_witnesses: Option<u64>,
-    /// Distinct validators participating across the segment.
+    pub fully_witnessed: Option<bool>,
+    /// Blocks above the common ancestor.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub coverage: Option<u64>,
-    /// Self-voted forks: the first under-witnessed height.
+    pub length: Option<u64>,
+    /// Σ verified witness signatures across the segment.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub first_solo_height: Option<u64>,
+    pub votes: Option<u64>,
+    /// Distinct keys appearing as signer or proposer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub participation: Option<u64>,
 }
 
 /// Response for `noble_resetChain`.
