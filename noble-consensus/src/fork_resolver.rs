@@ -1480,6 +1480,55 @@ mod tests {
         }
     }
 
+    /// The live 0x93CDD0F8 divergence, as a decision test. Common ancestor
+    /// 1279; A holds 1280-1289 (10 solo blocks), B holds 1280-1284 (5). Both
+    /// Tier 0 — in a two-node fork each block carries only its proposer's vote.
+    /// Variety, density and witnessed_blocks all tie; `balance` decides, and
+    /// exactly one side must yield.
+    #[test]
+    fn two_node_solo_divergence_converges_on_the_better_participated_run() {
+        let a = solo(1280, 1, 1000, 0, 10, 10); // 10 blocks, one key
+        let b = solo(1280, 1, 1000, 0, 5, 5); //  5 blocks, one key
+
+        // B's view: local is the 5-block run, rival is A's 10-block run.
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let from_b = vec![local_with(1284, b, 1279), remote_with(1, 1289, 1, a)];
+        match fr.evaluate(1284, &from_b, 2, hash(0)) {
+            ForkDecision::Resolve { target_height, .. } => assert_eq!(
+                target_height, 1289,
+                "the shorter solo run must yield to the better-participated one"
+            ),
+            other => panic!("B must yield, got {other:?}"),
+        }
+
+        // A's view, mirrored: it must hold. Exactly one side abandons.
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let from_a = vec![local_with(1289, a, 1279), remote_with(1, 1284, 1, b)];
+        assert_eq!(
+            fr.evaluate(1289, &from_a, 2, hash(1)),
+            ForkDecision::NoAction,
+            "A holds the better-participated run and must not roll back"
+        );
+    }
+
+    /// D1 also froze the *witnessed* side: a node with a properly witnessed
+    /// segment, behind a longer solo chain, never got to assess and so sat in
+    /// Syncing. Once it can assess, the answer is the one 0.151.0 specifies —
+    /// hold, and let the solo node come back. Guards the acceptance case.
+    #[test]
+    fn witnessed_node_facing_a_longer_solo_rival_holds() {
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![
+            local_with(1284, witnessed(2, 2, 2, 10), 1284),
+            remote_with(1, 1289, 1, solo(1280, 1, 1000, 0, 10, 10)),
+        ];
+        assert_eq!(
+            fr.evaluate(1284, &forks, 2, hash(0)),
+            ForkDecision::NoAction,
+            "a witnessed segment is never traded for a self-voted one, at any length"
+        );
+    }
+
     #[test]
     fn solo_density_beats_solo_length_at_equal_variety() {
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);

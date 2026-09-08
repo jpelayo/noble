@@ -100,6 +100,9 @@ const SYNC_PEER_MAX_FAILURES: u32 = 2;
 /// R2: how long a peer whose chain we refused is skipped as a sync source.
 /// Bounded so a peer that later re-founds correctly is not shunned forever.
 const REJECTED_SOURCE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+/// D3: ceiling for ancestor-discovery backoff — one cycle. Retries never stop,
+/// they only slow down, so the state stays transient without polling hard.
+const ANCESTOR_RETRY_MAX_SECS: u64 = 960;
 
 const TIP_QUARANTINE_CAP: usize = 256;
 /// K3-04: base quarantine after repeated failed tip substantiation (secs).
@@ -399,6 +402,9 @@ pub struct HealingManager<S: StorageEngine + Send + Sync + 'static> {
     /// re-founds correctly is not shunned forever. This replaced a halt: the
     /// node used to stop entirely rather than just stop pulling from one peer.
     rejected_sync_sources: HashMap<Vec<u8>, std::time::Instant>,
+    /// D3: `(unix_secs_of_last_send, attempt_count)` for ancestor discovery,
+    /// so it retries with backoff while `fork_common_ancestor` is unknown.
+    last_ancestor_request: Option<(u64, u32)>,
 
     // ── Legitimacy assessment (F3–F6) ──
     /// Rival segments being fetched for assessment, keyed by peer id bytes.
@@ -511,6 +517,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             sync_progress_total,
             sync_blocks_delivered: Arc::new(AtomicU64::new(0)),
             rejected_sync_sources: HashMap::new(),
+            last_ancestor_request: None,
             awaiting_assessment: HashMap::new(),
             assessments: HashMap::new(),
             solo_adoption_permit: None,
@@ -821,6 +828,25 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     fn peer_tip_hex(&self, peer: &[u8]) -> Option<String> {
         let hex_pid = hex::encode(peer);
         self.peer_info.read().get(&hex_pid).and_then(|e| e.chain_tip_hash.clone())
+    }
+
+    /// F2: clear any sync-source rejection for the peer holding `tip`.
+    ///
+    /// The `ChainMismatch` that triggered resolution drops the serving peer, so
+    /// by the time the resolver decides to adopt that peer's chain it is sitting
+    /// in `rejected_sync_sources` and `select_sync_peer` refuses to pick it.
+    /// A decided adoption overrides an earlier refusal of the same chain.
+    fn readmit_adoption_source(&mut self, tip: Hash256) {
+        if let Some(peer) = self.peer_for_tip(tip) {
+            if self.rejected_sync_sources.remove(&peer).is_some() {
+                tracing::info!(
+                    task = "fork_resolution",
+                    peer = %hex::encode(&peer),
+                    "re-admitting sync source: its chain was refused earlier, and has now been \
+                     judged the one to adopt"
+                );
+            }
+        }
     }
 
     /// A connected same-chain peer advertising `tip` as its chain tip.
@@ -1440,9 +1466,27 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
     /// Reset sync state to Idle and update atomics.
     fn reset_sync_idle(&mut self) {
+        // F5: a solo-adoption permit is scoped to one sync — but "one sync"
+        // means the PERMITTED sync, not any reset that happens to pass through.
+        // Clearing unconditionally killed a permit granted milliseconds earlier
+        // by `execute_resolution` (which resets on its way out), and any
+        // `check_sync_stall` alarm firing before the first block imported would
+        // do the same — recreating the deadlock with a different trigger. So
+        // the permit dies only when the sync it authorised is the one ending.
+        let permitted_sync_ending = match (&self.solo_adoption_permit, &self.sync_state) {
+            (Some((permit_peer, _)), SyncState::AwaitingManifest { peer, .. })
+            | (Some((permit_peer, _)), SyncState::Fetching { peer, .. }) => permit_peer == peer,
+            _ => false,
+        };
+        if permitted_sync_ending {
+            self.solo_adoption_permit = None;
+        } else if self.solo_adoption_permit.is_some() {
+            tracing::debug!(
+                task = "sync",
+                "solo-adoption permit preserved across a reset of an unrelated sync"
+            );
+        }
         self.sync_state = SyncState::Idle;
-        // F5: a solo-adoption permit is scoped to one sync.
-        self.solo_adoption_permit = None;
         // A clean idle reset (typically sync-complete) clears the failure streak.
         self.sync_failure_streak = 0;
         self.sync_atomics_from_state();
@@ -2168,13 +2212,45 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                                 "chain mismatch clue: sync block {} rejected ({reason})",
                                 height,
                             );
+                            // D1: pausing the conveyor is not enough. `detect_forks`
+                            // opens with `if self.is_syncing() { return }` and is the
+                            // ONLY caller of `start_assessment` and the only trigger of
+                            // ancestor discovery. Leaving `sync_state` non-Idle here
+                            // deadlocked the node: the step that makes the rival
+                            // knowable was skipped because we were syncing, and the
+                            // sync could never finish because the fork was unresolved,
+                            // so `execute_resolution` refused forever on
+                            // `rival == Unknown`. Drop the source (so selection does not
+                            // hand back the same doomed peer) and go Idle (so the next
+                            // tick may assess it). `start_assessment` resolves its peer
+                            // through `peer_for_tip`, not `select_sync_peer`, so the
+                            // drop does not block assessing the very chain we refused.
+                            self.drop_sync_source(&reason);
+                            self.reset_sync_idle();
                             self.ingest_clue(HealingClue::SyncChainMismatch {
                                 rejected_height: height,
                                 sync_target,
                                 reason: format!("sync block {height} rejected: {reason}"),
                             });
-                            // Pause conveyor — evaluate_and_execute will decide.
                             return;
+                        }
+                        // F1a: our own storage failed — the peer is blameless.
+                        // Ordinary retry accounting, no drop, no fork clue.
+                        RejectKind::LocalStorage => {
+                            let attempts = match manifest[*cursor].status {
+                                EntryStatus::Failed { attempts } => attempts + 1,
+                                _ => 1,
+                            };
+                            tracing::error!(
+                                task = "sync",
+                                "local storage error importing block {height} \
+                                 (attempt {attempts}): {reason}"
+                            );
+                            if attempts >= SYNC_MAX_BLOCK_RETRIES {
+                                self.reset_sync_idle();
+                                return;
+                            }
+                            manifest[*cursor].status = EntryStatus::Failed { attempts };
                         }
                         // No genesis: no peer and no number of retries can fix
                         // this, so don't burn attempts pretending otherwise.
@@ -2584,6 +2660,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             self.fork_visible = true;
             // Clear stale ancestor from any previous fork.
             self.fork_common_ancestor = None;
+            self.last_ancestor_request = None;
             let remote: Vec<_> = fork_groups.iter().filter(|g| !g.is_local).collect();
             self.broadcast_event(serde_json::json!({
                 "event": "fork_detected",
@@ -2592,39 +2669,70 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 "remote_heights": remote.iter().map(|g| g.height).collect::<Vec<_>>(),
                 "remote_peer_counts": remote.iter().map(|g| g.peer_count).collect::<Vec<_>>(),
             }));
-            // Start common ancestor discovery with the first remote peer group.
-            if let Some(remote_group) = fork_groups.iter().find(|g| !g.is_local) {
-                let peers_on_fork: Vec<_> = peers
-                    .values()
-                    .filter(|e| {
-                        e.chain_tip_hash.as_deref()
-                            == Some(&hex::encode(remote_group.tip_hash.as_bytes()))
-                    })
-                    .collect();
-                if let Some(peer_entry) = peers_on_fork.first() {
-                    match hex::decode(&peer_entry.peer_id) {
-                        Ok(pid_bytes) => {
-                            self.send_network(NetworkCommand::FindCommonAncestor {
-                                peer_id: pid_bytes,
-                                local_height: our_height,
-                                peer_height: remote_group.height,
-                            });
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                task = "healing",
-                                "failed to decode peer_id for FindCommonAncestor: {e} — fork ancestor discovery skipped",
-                            );
-                        }
-                    }
-                }
-            }
         } else if !is_forked && self.fork_visible {
             self.fork_visible = false;
+            self.last_ancestor_request = None;
             self.broadcast_event(serde_json::json!({
                 "event": "fork_aligned",
                 "height": our_height,
             }));
+        }
+
+        // D3: ancestor discovery must not be edge-triggered. It used to fire
+        // once, on the transition into "forked", in the same branch that clears
+        // `fork_common_ancestor`. A dropped response — or simply entering
+        // Syncing before it landed — left the ancestor unknown forever, and
+        // `execute_resolution` then refused with "Operator action required": a
+        // human-in-the-loop dead end for a transient condition. Retry for as
+        // long as the ancestor is unknown, backing off so the cost is bounded,
+        // and never stop. Every fork group is on OUR chain id (a different
+        // genesis is a different chain), so an ancestor always exists.
+        if is_forked && self.fork_common_ancestor.is_none() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let (due, attempt) = match self.last_ancestor_request {
+                None => (true, 0u32),
+                Some((at, n)) => {
+                    let backoff = SYNC_RETRY_SECS
+                        .saturating_mul(1u64 << n.min(7))
+                        .min(ANCESTOR_RETRY_MAX_SECS);
+                    (now.saturating_sub(at) >= backoff, n)
+                }
+            };
+            if due {
+                if let Some(remote_group) = fork_groups.iter().find(|g| !g.is_local) {
+                    let tip_hex = hex::encode(remote_group.tip_hash.as_bytes());
+                    let peer_on_fork = peers
+                        .values()
+                        .find(|e| e.chain_tip_hash.as_deref() == Some(&tip_hex))
+                        .map(|e| e.peer_id.clone());
+                    if let Some(peer_id) = peer_on_fork {
+                        match hex::decode(&peer_id) {
+                            Ok(pid_bytes) => {
+                                tracing::info!(
+                                    task = "healing",
+                                    attempt = attempt + 1,
+                                    "common ancestor unknown — requesting it from a peer on the rival fork"
+                                );
+                                self.send_network(NetworkCommand::FindCommonAncestor {
+                                    peer_id: pid_bytes,
+                                    local_height: our_height,
+                                    peer_height: remote_group.height,
+                                });
+                                self.last_ancestor_request = Some((now, attempt.saturating_add(1)));
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    task = "healing",
+                                    "failed to decode peer_id for FindCommonAncestor: {e} — retrying next tick",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if fork_groups.is_empty() {
@@ -2999,10 +3107,15 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         // instead and leave the chain intact; a deliberate reset stays
         // available through the TOTP-gated manual RPC.
         let Some((ancestor_height, _)) = self.fork_common_ancestor else {
-            tracing::error!(
+            // The guard itself stays: without an ancestor the only "resolution"
+            // available is rollback_to(0) — a full wipe chosen on peer-reported
+            // heights. But this is no longer a dead end needing a person: D3
+            // retries discovery for as long as the fork is visible, so the
+            // condition is transient and the next tick may well clear it.
+            tracing::warn!(
                 task = "fork_resolution",
-                "REFUSING automatic resolution: common ancestor unknown — not resetting to genesis. \
-                 Operator action required (manual reset is available via authenticated RPC)."
+                "resolution deferred: common ancestor not yet known — not resetting to genesis; \
+                 ancestor discovery is retrying"
             );
             return;
         };
@@ -3016,10 +3129,16 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         let (local_leg, _prefix_end) = self.local_segment_legitimacy(ancestor_height);
         let rival_leg = self.rival_legitimacy_for(target_hash);
         match (local_leg, rival_leg) {
-            (SegmentLegitimacy::SelfVoted { .. }, SegmentLegitimacy::Witnessed(_)) => {}
+            (SegmentLegitimacy::SelfVoted { .. }, SegmentLegitimacy::Witnessed(_)) => {
+                // F2: the mismatch that started this almost certainly dropped
+                // the peer we have now decided to adopt from. Re-admit it, or
+                // `select_sync_peer` skips it and the adoption stalls again.
+                self.readmit_adoption_source(target_hash);
+            }
             (SegmentLegitimacy::SelfVoted { grade: mine, .. }, SegmentLegitimacy::SelfVoted { grade: theirs, .. })
                 if theirs > mine =>
             {
+                self.readmit_adoption_source(target_hash);
                 if let Some(peer) = self.peer_for_tip(target_hash) {
                     self.solo_adoption_permit =
                         Some((peer, hex::encode(target_hash.as_bytes())));
@@ -3063,6 +3182,18 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
         // Rollback or reset storage.
         self.rollback_to(rollback_height);
+
+        // Re-arm the stall watch against the post-rollback tip: otherwise the
+        // 300s alarm still measures the pre-rollback episode and can fire
+        // immediately on a sync that has only just begun.
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            self.stall_watch_height = rollback_height;
+            self.stall_watch_since = now;
+        }
 
         // Clear cycle history.
         self.clear_cycle_history_storage();
@@ -3608,7 +3739,11 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 Ok(header) => Some(header),
                 Err(e) => {
                     tracing::error!(task = "sync_import", "failed to load parent header: {e}");
-                    return SyncImportResult::reject(RejectKind::ChainMismatch, format!("parent header error: {e}"));
+                    // Our disk, not their chain — see RejectKind::LocalStorage.
+                    return SyncImportResult::reject(
+                        RejectKind::LocalStorage,
+                        format!("parent header error: {e}"),
+                    );
                 }
             }
         } else {
@@ -4437,6 +4572,13 @@ pub enum RejectKind {
     /// retry budget is exhausted is the block unprovable, and unprovable is
     /// then legitimacy zero (plan Step 0).
     WitnessMissing,
+    /// OUR storage failed while loading OUR own tip header — nothing about the
+    /// peer or its chain. Kept distinct from `ChainMismatch` because the
+    /// mismatch arm drops the serving peer as a sync source: a local I/O error
+    /// would otherwise quarantine an innocent peer for `REJECTED_SOURCE_TTL`
+    /// and, worse, raise a fork clue for a fork that does not exist.
+    /// Retryable, no drop, no clue.
+    LocalStorage,
 }
 
 impl SyncImportResult {
@@ -5201,6 +5343,201 @@ mod tests {
         }
     }
 
+    /// D1: a chain mismatch must RELEASE the sync guard, not merely pause the
+    /// conveyor. `detect_forks` is the only caller of `start_assessment` and
+    /// the only trigger of ancestor discovery, and it returns early while
+    /// `is_syncing()`. Leaving sync_state non-Idle here deadlocked the node:
+    /// the rival could never be assessed, so `execute_resolution` refused
+    /// forever on `rival == Unknown`.
+    #[test]
+    fn chain_mismatch_releases_the_sync_guard() {
+        let mut h = make_healing_manager();
+        let peer = vec![7u8, 7, 7];
+        h.sync_state = SyncState::Fetching {
+            peer: peer.clone(),
+            target: 1289,
+            manifest: vec![ManifestEntry {
+                height: 1285,
+                hash: [0xAB; 32],
+                status: EntryStatus::Requested { at: 0 },
+            }],
+            cursor: 0,
+        };
+        assert!(h.is_syncing());
+
+        h.advance_after_import(
+            1285,
+            &SyncImportResult::reject(RejectKind::ChainMismatch, "prev_hash mismatch"),
+            0,
+        );
+
+        assert!(!h.is_syncing(), "the guard must be released so detect_forks can run");
+        assert!(
+            h.is_rejected_sync_source(&peer),
+            "the peer whose chain we refused must not be re-picked immediately"
+        );
+    }
+
+    /// F1a: a failure to read OUR OWN tip header is our disk, not their chain.
+    /// It must not drop the peer, and must not raise a fork clue for a fork
+    /// that does not exist.
+    #[test]
+    fn local_storage_error_does_not_drop_the_peer() {
+        let mut h = make_healing_manager();
+        let peer = vec![7u8, 7, 7];
+        h.sync_state = SyncState::Fetching {
+            peer: peer.clone(),
+            target: 30,
+            manifest: vec![ManifestEntry {
+                height: 10,
+                hash: [0xAB; 32],
+                status: EntryStatus::Requested { at: 0 },
+            }],
+            cursor: 0,
+        };
+
+        h.advance_after_import(
+            10,
+            &SyncImportResult::reject(RejectKind::LocalStorage, "parent header error: disk"),
+            0,
+        );
+
+        assert!(
+            !h.is_rejected_sync_source(&peer),
+            "our own storage failing must never quarantine an innocent peer"
+        );
+        assert!(
+            !h.clue_collector.has_clues(),
+            "a local I/O error is not evidence of a fork"
+        );
+    }
+
+    /// F2: `execute_resolution` resets sync on its way out. Under the old
+    /// unconditional clear that destroyed the permit it had just granted, so
+    /// the adopted chain's unwitnessed blocks were rejected as `SelfVoted` and
+    /// the whole solo-adoption branch was dead code in production.
+    #[test]
+    fn solo_adoption_permit_survives_an_unrelated_reset() {
+        let mut h = make_healing_manager();
+        let peer = vec![7u8, 7, 7];
+        let tip_hex = hex::encode([0xC1u8; 32]);
+        h.solo_adoption_permit = Some((peer.clone(), tip_hex));
+
+        // A reset of a DIFFERENT peer's sync must leave the permit alone.
+        h.sync_state = SyncState::Fetching {
+            peer: vec![9, 9, 9],
+            target: 30,
+            manifest: Vec::new(),
+            cursor: 0,
+        };
+        h.reset_sync_idle();
+        assert!(h.solo_adoption_permit.is_some(), "an unrelated sync ending must not revoke it");
+
+        // And a reset from Idle — which is exactly what execute_resolution does
+        // immediately after granting — must also leave it alone.
+        h.reset_sync_idle();
+        assert!(h.solo_adoption_permit.is_some(), "an Idle reset must not revoke it");
+    }
+
+    /// F2: the stall alarm calls `reset_sync_idle` too. If it fired between the
+    /// grant and the first imported block it would revoke the permit and
+    /// recreate the deadlock through a different door.
+    #[test]
+    fn stall_alarm_does_not_kill_a_fresh_permit() {
+        let mut h = make_healing_manager();
+        let peer = vec![7u8, 7, 7];
+        let tip_hex = hex::encode([0xC1u8; 32]);
+        h.peer_info
+            .write()
+            .insert(hex::encode(&peer), peer_entry(&peer, &tip_hex, 1289));
+        h.solo_adoption_permit = Some((peer.clone(), tip_hex));
+
+        let now = 10_000u64;
+        h.stall_watch_height = 0;
+        h.stall_watch_since = 1;
+        h.check_sync_stall(0, now);
+
+        assert!(
+            h.solo_adoption_permit.is_some(),
+            "a stall alarm must not revoke a permit for a sync that has not started"
+        );
+    }
+
+    /// F2: the mismatch that triggers resolution drops the serving peer. By the
+    /// time the resolver decides to adopt that peer's chain it is quarantined,
+    /// and `select_sync_peer` would skip it — stalling the adoption a second
+    /// time. A decided adoption overrides the earlier refusal.
+    #[test]
+    fn adopted_peer_is_readmitted_as_a_sync_source() {
+        let mut h = make_healing_manager();
+        let peer = vec![7u8, 7, 7];
+        let tip = Hash256::from_bytes([0xC1; 32]);
+        let tip_hex = hex::encode(tip.as_bytes());
+        h.peer_info
+            .write()
+            .insert(hex::encode(&peer), peer_entry(&peer, &tip_hex, 1289));
+        h.rejected_sync_sources.insert(peer.clone(), std::time::Instant::now());
+        assert!(h.is_rejected_sync_source(&peer));
+
+        h.readmit_adoption_source(tip);
+
+        assert!(
+            !h.is_rejected_sync_source(&peer),
+            "the peer whose chain we decided to adopt must be selectable again"
+        );
+    }
+
+    /// D3: ancestor discovery used to be edge-triggered — one send, in the same
+    /// branch that clears `fork_common_ancestor`. A lost response (or entering
+    /// Syncing before it landed) left the ancestor unknown forever, and
+    /// `execute_resolution` then refused with "Operator action required": a
+    /// human-in-the-loop dead end for a transient condition.
+    #[test]
+    fn ancestor_discovery_retries_while_unknown() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut h = make_healing_manager();
+        h.network_cmd = Some(tx);
+        let (_genesis, cid) = found_chain(&mut h);
+
+        // A peer on a rival tip at a greater height → two fork groups.
+        // `compute_fork_groups` skips peers whose chain_id is unannounced, so
+        // it must be set for this peer to form a group at all.
+        let peer = vec![7u8, 7, 7];
+        let rival_tip = hex::encode([0xC1u8; 32]);
+        let mut entry = peer_entry(&peer, &rival_tip, 1289);
+        entry.chain_id = Some(cid);
+        h.peer_info.write().insert(hex::encode(&peer), entry);
+
+        let count_ancestor_requests = |rx: &mut mpsc::Receiver<NetworkCommand>| {
+            let mut n = 0;
+            while let Ok(cmd) = rx.try_recv() {
+                if matches!(cmd, NetworkCommand::FindCommonAncestor { .. }) {
+                    n += 1;
+                }
+            }
+            n
+        };
+
+        h.detect_forks();
+        assert!(h.fork_common_ancestor.is_none(), "still unknown");
+        assert_eq!(count_ancestor_requests(&mut rx), 1, "first attempt goes out");
+
+        // Immediately again: the backoff must suppress it.
+        h.detect_forks();
+        assert_eq!(count_ancestor_requests(&mut rx), 0, "backoff suppresses a same-tick retry");
+
+        // Past the backoff window: it must try again rather than give up.
+        h.last_ancestor_request = Some((0, 0));
+        h.detect_forks();
+        assert_eq!(count_ancestor_requests(&mut rx), 1, "discovery retries — it never stops");
+
+        // Once known, it stops asking.
+        h.fork_common_ancestor = Some((1279, [0xAA; 32]));
+        h.last_ancestor_request = Some((0, 0));
+        h.detect_forks();
+        assert_eq!(count_ancestor_requests(&mut rx), 0, "a known ancestor ends the retries");
+    }
+
     fn peer_entry(peer: &[u8], tip_hex: &str, height: u64) -> PeerInfoEntry {
         PeerInfoEntry {
             peer_id: hex::encode(peer),
@@ -5283,7 +5620,18 @@ mod tests {
         );
         assert_eq!(h.select_sync_peer(20, None).0, None, "a self-voted tip is not a source");
         h.solo_adoption_permit = Some((peer.clone(), tip_hex.clone()));
-        assert_eq!(h.select_sync_peer(20, None).0, Some(peer), "the permitted peer is");
+        assert_eq!(h.select_sync_peer(20, None).0, Some(peer.clone()), "the permitted peer is");
+        // F2: "scoped to one sync" means the PERMITTED sync. The fixture used
+        // to reset from Idle, which is the case that must now SURVIVE — under
+        // the old unconditional clear, `execute_resolution`'s own trailing
+        // reset destroyed every permit it had just granted. Put the permitted
+        // sync in flight, then end it.
+        h.sync_state = SyncState::Fetching {
+            peer: peer.clone(),
+            target: 30,
+            manifest: Vec::new(),
+            cursor: 0,
+        };
         h.reset_sync_idle();
         assert!(h.solo_adoption_permit.is_none(), "a permit is scoped to one sync");
     }
