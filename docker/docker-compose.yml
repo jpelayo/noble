@@ -19,6 +19,11 @@
 #   NOBLE_ALLOWED_IPS=10.0.0.0/8      docker compose up -d --build  # corp LAN
 #   docker compose up -d --build                                    # localhost only
 #
+# COMPILE_CORES caps the BUILD (not the running node) so a shared cloud
+# instance keeps cores free. Unset or 0 = every core. Combines with the above:
+#
+#   NOBLE_ALLOWED_IPS=100.64.0.0/10 COMPILE_CORES=2 docker compose up -d --build
+#
 # For nginx-proxy-manager fronting (TLS off, attach to `proxy` net), use
 # docker-compose.override.yml — see docker/README.md.
 
@@ -34,6 +39,9 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        # Compile-time CPU cap. Unset or 0 = every core.
+        COMPILE_CORES: ${COMPILE_CORES:-}
     image: noble:latest
     container_name: noble
     restart: unless-stopped
