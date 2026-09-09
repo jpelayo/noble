@@ -35,7 +35,39 @@ WORKDIR /src
 COPY . .
 
 # Release build of the three runtime binaries.
-RUN cargo build --release \
+#
+# COMPILE_CORES caps concurrent rustc jobs so a shared cloud instance is not
+# saturated by a build:
+#
+#   COMPILE_CORES=2 docker compose up -d --build
+#   docker build --build-arg COMPILE_CORES=2 -f docker/Dockerfile ..
+#
+# Unset = cargo's default, one job per core.
+#
+# The cap lives here, in cargo, rather than in docker's --cpus/--cpuset-cpus:
+# BuildKit ignores those flags entirely (they bind only on the legacy builder,
+# DOCKER_BUILDKIT=0), so setting them would look like it worked and do
+# nothing. The release profile is cargo's default — codegen-units=16, no LTO —
+# so the build really is parallel rustc jobs, and bounding them bounds peak
+# memory along with CPU.
+# Unset, 0, or anything that is not a positive integer → cargo's default.
+# 0 must not reach cargo: `-j 0` is an error, so an unvalidated pass-through
+# would turn "no limit" into a failed build. Bad input is reported, never
+# silently swallowed.
+ARG COMPILE_CORES=""
+RUN cores_valid=0; \
+    case "$COMPILE_CORES" in \
+      '') ;; \
+      *[!0-9]*) echo "warning: COMPILE_CORES='$COMPILE_CORES' is not a positive integer — using all cores" ;; \
+      *) [ "$COMPILE_CORES" -gt 0 ] && cores_valid=1 ;; \
+    esac; \
+    if [ "$cores_valid" = 1 ]; then \
+      echo "cargo: limiting build to $COMPILE_CORES core(s)"; \
+      export CARGO_BUILD_JOBS="$COMPILE_CORES"; \
+    else \
+      echo "cargo: building with all available cores"; \
+    fi; \
+    cargo build --release \
       --bin noble-node \
       --bin noble-tool \
       --bin noble-faucet
