@@ -13,7 +13,12 @@ FROM rust:1-slim-bookworm AS builder
 # openssl-sys:     libssl-dev + pkg-config (system) OR make+perl (vendored)
 #                  Workspace uses `openssl = { features = ["vendored"] }` so
 #                  the vendored path applies — make+perl required.
-# noble-core:      git for build.rs commit-sha embedding
+# noble-tx-core:   cc crate compiles its C sources (pulled in by noble-faucet)
+#
+# No build script reads git metadata — `.git` is excluded from the build
+# context, and nothing needs it. `git` stays installed only because some
+# crates' build scripts fetch nothing but expect it on PATH; drop it if a
+# future audit shows otherwise.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake perl pkg-config \
     llvm llvm-dev libclang-dev clang \
@@ -22,6 +27,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
+# `.dockerignore` at the context root (NOBLEv1/, per `context: ..` in
+# docker-compose.yml) keeps `target/` out. It previously lived beside this
+# file as `docker/.dockerignore`, where Docker never reads it — so every
+# build copied the whole 15 GB `target/` in, and the host's artifacts landed
+# here where cargo could reuse them and emit a binary older than the source.
 COPY . .
 
 # Release build of the three runtime binaries.
