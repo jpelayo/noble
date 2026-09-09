@@ -1,0 +1,47 @@
+# Keep the build context small. Excludes everything not needed to compile
+# noble-node, noble-tool, noble-faucet, or to copy noble-gui into the runtime.
+#
+# MUST live at the BUILD CONTEXT ROOT, which is this directory: docker-compose
+# sets `context: ..` relative to docker/, so Docker looks for `.dockerignore`
+# here and nowhere else. It previously sat next to the Dockerfile as
+# `docker/.dockerignore`, where Docker never reads it (BuildKit would honour
+# `docker/Dockerfile.dockerignore`, but not a bare `.dockerignore` there).
+# The effect was silent: every build shipped the whole 15 GB `target/` as
+# context, and the host's build artifacts landed in `/src/target` inside the
+# builder — where cargo could reuse them and produce a binary older than the
+# source it was built from. The GUI then reported that older version, since
+# `SOFTWARE_VERSION` is `env!("CARGO_PKG_VERSION")`, baked in at compile time.
+
+# Cargo build artifacts (the build runs INSIDE the builder stage)
+target
+**/target
+
+# Git + IDE
+.git
+.gitignore
+.idea
+.vscode
+**/*.swp
+**/.DS_Store
+
+# Apple-side client apps (not needed for the server container)
+noble-client/official-apps/NobleApp
+noble-client/official-apps/NobleMac
+noble-client/official-apps/NobleDoc
+noble-client/official-apps/NobleWin
+
+# WebUI assets are bundled in the client apps, not the server
+noble-client/noble-client-libraries/WebUI
+
+# Server-side test artifacts not needed at runtime
+fuzz
+testnet
+Project
+
+# Local secrets — never bake into image
+docker/.env
+**/.env
+**/*.local
+
+# Pre-built Apple xcframeworks (large, not used by the server)
+**/*.xcframework
