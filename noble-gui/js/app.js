@@ -403,7 +403,6 @@ const _align = {
   shown: null,     // state currently painted
   cand: null,      // pending lower-urgency candidate
   candSince: 0,
-  target: 0,       // monotonic sync target (sticky highest_known)
   last: null,      // last raw args, so the hold timer can re-commit
   timer: null,
 };
@@ -411,23 +410,6 @@ const _align = {
 // States that must appear IMMEDIATELY rather than waiting out the debounce:
 // the debounce exists to stop flapping, not to delay bad news.
 const _alignUrgent = (s) => s === 'Syncing' || s === 'Diverged';
-
-// Map raw (state, height, highest) to the state we should DISPLAY, with heights
-// as the source of truth. Mutates _align.target (monotonic).
-function _alignAuthoritative(st, height, highest) {
-  height = +height || 0;
-  highest = +highest || 0;
-  if (highest > _align.target) _align.target = highest; // never let a 0-blip drop the target
-  const target = Math.max(highest, _align.target);
-
-  // Diverged is a conclusion the node asserts about itself, not a symptom —
-  // never second-guessed here.
-  if (st === 'Diverged') return st;
-
-  if (height > 0 && target > height) return 'Syncing';  // behind -> always Syncing
-  if (st === 'Syncing') return height > 0 ? 'Aligned' : 'Bootstrapping';
-  return st || (height > 0 ? 'Aligned' : 'Isolated');
-}
 
 async function updateForkStatus() {
   if (!document.getElementById('fork-status-bar')) return;
@@ -458,10 +440,10 @@ function onAlignmentChanged(data) {
 
 function renderAlignment(st, height, highestKnown, progress, cyclesRemaining) {
   const bar = document.getElementById('fork-status-bar');
-  if (!bar) return;
+  if (!bar || !st) return;
   _align.last = { st, height, highestKnown, progress, cyclesRemaining };
 
-  const want = _alignAuthoritative(st, height, highestKnown);
+  const want = st;
   const now = Date.now();
 
   if (_align.shown === null || want === _align.shown) {
@@ -476,7 +458,6 @@ function renderAlignment(st, height, highestKnown, progress, cyclesRemaining) {
     if (now - _align.candSince >= ALIGN_HOLD_MS) {
       _align.shown = want;
       _align.cand = null;
-      if (want !== 'Syncing') _align.target = +highestKnown || 0; // reset sticky target once settled
     } else {
       // Re-commit after the hold elapses even if no further event arrives.
       clearTimeout(_align.timer);
@@ -497,7 +478,7 @@ function paintAlignment(bar, st, height, highestKnown, cyclesRemaining) {
 
   if (st === 'Syncing') {
     const h = +height || 0;
-    const tgt = Math.max(+highestKnown || 0, _align.target, h);
+    const tgt = Math.max(+highestKnown || 0, h);
     label.innerHTML = '<span class="fork-sync-spinner"></span>Syncing';
     detail.textContent = tgt > h
       ? `block ${formatNumber(h)} / ${formatNumber(tgt)} (${(h / tgt * 100).toFixed(1)}%)`

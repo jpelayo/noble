@@ -33,7 +33,7 @@ const STATE_STYLES = {
 };
 
 export function init(root, ctx) {
-  const { rpc, ws, getState } = ctx;
+  const { rpc, ws, getState, subscribe } = ctx;
   const unsubs = [];
   let tickFn = null;
 
@@ -849,23 +849,9 @@ export function init(root, ctx) {
       if (data.event === 'phase_change') {
         scheduleReload(loadCycle, loadTimeline, loadVoteTallies);
       }
-      // Sync banner: show on sync_started, update on sync_progress, hide on sync_complete
-      if (data.event === 'sync_started') {
-        updateSyncBanner(true, data.peer_height);
-      } else if (data.event === 'sync_progress' && data.target) {
-        updateSyncBanner(true, data.target, data.height, data.progress);
-      } else if (data.event === 'sync_complete') {
-        updateSyncBanner(false);
-        // After sync finishes, all panels need a full refresh — the timeline,
-        // cycle display, vote tallies, and validator list are all stale.
-        scheduleReload(loadCycle, loadTimeline, loadVoteTallies, loadValidators);
-      } else if (data.event === 'integrity_recovery' || data.event === 'sync_source_rejected'
-                 || data.event === 'adoption_declined' || data.event === 'genesis_requested') {
-        // The node resolves these itself. Show it as work in progress, not as a
-        // failure demanding attention — there is nothing for an operator to do.
-        paintBanner('sync', data.message || 'Recovering automatically\u2026');
-      } else if (data.event === 'integrity_repaired') {
-        updateSyncBanner(false);
+      if (data.event === 'sync_complete' || data.event === 'integrity_repaired') {
+        // After a sync or an integrity repair, all panels need a full refresh —
+        // the timeline, cycle display, vote tallies, and validator list are stale.
         scheduleReload(loadCycle, loadTimeline, loadVoteTallies, loadValidators);
       }
     }));
@@ -927,43 +913,33 @@ export function init(root, ctx) {
     }).catch(() => {});
   }
 
-  // ── Sync banner management ──
+  // ── Sync banner ──
+  // Renders the node's alignment (the shared store, app.js), like the sidebar
+  // badge — no state of its own, so it cannot outlive the sync it describes.
   const syncBanner = root.querySelector('#cs-sync-banner');
 
-  function paintBanner(kind, message) {
+  function renderSyncBanner(a) {
     if (!syncBanner) return;
-    const err = kind === 'blocked';
+    if (a?.state !== 'Syncing') {
+      syncBanner.style.display = 'none';
+      return;
+    }
+    const h = +a.height || 0;
+    const tgt = Math.max(+a.highestKnown || 0, h);
     syncBanner.style.display = 'block';
-    syncBanner.style.background = err ? 'var(--bg-error, #fee2e2)' : 'var(--bg-warning, #fef3c7)';
-    syncBanner.style.borderColor = err ? 'var(--border-error, #ef4444)' : 'var(--border-warning, #f59e0b)';
-    syncBanner.style.color = err ? 'var(--text-error, #991b1b)' : 'var(--text-warning, #92400e)';
-    syncBanner.textContent = message;
+    syncBanner.textContent = tgt > h
+      ? `Syncing \u2014 block ${formatNumber(h)} of ${formatNumber(tgt)} (${(h / tgt * 100).toFixed(1)}%)`
+      : 'Syncing \u2014 catching up to peer chain\u2026';
   }
 
-  function updateSyncBanner(syncing, targetHeight, currentHeight, progressPct) {
-    if (!syncBanner) return;
-    if (syncing) {
-      paintBanner('sync', '');
-      syncBanner.style.display = 'block';
-      if (currentHeight && targetHeight) {
-        syncBanner.textContent = `Syncing \u2014 block ${formatNumber(currentHeight)} of ${formatNumber(targetHeight)} (${progressPct || 0}%)`;
-      } else if (targetHeight) {
-        syncBanner.textContent = `Syncing \u2014 catching up to height ${formatNumber(targetHeight)}\u2026`;
-      } else {
-        syncBanner.textContent = 'Syncing \u2014 catching up to peer chain\u2026';
-      }
-    } else {
-      syncBanner.style.display = 'none';
-    }
-  }
+  renderSyncBanner(getState().alignment);
+  unsubs.push(subscribe('alignment', renderSyncBanner));
 
   // ── Startup seed: lightweight "node is alive" snapshot ──
   function seedNodeStatus() {
     rpc.call('noble_getNodeInfo').then(info => {
       if (info) {
         pushActivity({ event: 'heartbeat', message: `Node v${info.version}` });
-        // Show sync banner immediately from RPC state (no WS event needed).
-        updateSyncBanner(info.sync_behind, info.sync_target_height, info.sync_current_height, info.sync_progress_pct);
       }
     }).catch(() => {});
   }
