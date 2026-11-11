@@ -77,7 +77,7 @@ public struct MockAPIService: NobleAPIService {
                 peerId: "12D3KooWExample1",
                 direction: "outbound",
                 address: "/ip4/192.168.1.100/tcp/8780",
-                nodeName: "Blackview-Node",
+                nodeName: "Linux-Observer",
                 countryCode: "ESP",
                 connectedAt: Date(timeIntervalSinceNow: -3600),
                 chainTipHeight: 1_247

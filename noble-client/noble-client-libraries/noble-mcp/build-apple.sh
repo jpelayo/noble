@@ -16,7 +16,10 @@ TARGET_DIR="$WORKSPACE_ROOT/target"
 
 # macOS arm64 (the only target needed for NobleMac)
 echo "  macOS arm64..."
-cd "$WORKSPACE_ROOT" && MACOSX_DEPLOYMENT_TARGET=15.0 cargo build --release --target aarch64-apple-darwin --package noble-mcp
+# --remap-path-prefix: dependency source paths are compiled into the library
+# (panic locations); rewrite the builder's home directory so no local user
+# path ships inside the published XCFramework.
+cd "$WORKSPACE_ROOT" && RUSTFLAGS="--remap-path-prefix=$HOME=~" MACOSX_DEPLOYMENT_TARGET=15.0 cargo build --release --target aarch64-apple-darwin --package noble-mcp
 cd "$WORKSPACE_ROOT/noble-client/noble-client-libraries/noble-mcp"
 
 # Remove old framework if it exists

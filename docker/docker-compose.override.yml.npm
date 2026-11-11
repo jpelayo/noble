@@ -1,4 +1,4 @@
-# Optional override for nginx-proxy-manager fronting (README Path B).
+# Optional override for nginx-proxy-manager fronting.
 #
 # Activate by renaming/copying to docker-compose.override.yml:
 #   cp docker-compose.override.yml.npm docker-compose.override.yml

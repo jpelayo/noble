@@ -29,7 +29,7 @@ edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
 authors = ["InfiniteContext.com <blockchain@infinitecontext.com>"]
-repository = "https://github.com/InfiniteContext/NOBLEv1"
+repository = "https://github.com/jpelayo/noble"
 
 [workspace.dependencies]
 # Internal crates (path dependencies)
