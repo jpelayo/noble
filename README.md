@@ -1,61 +1,67 @@
 # NOBLE
 
-> The peer-to-peer server that powers the **NOBLE** chain — *Neutral Open Blockchain Environment*.
+NOBLE (Neutral Open Blockchain Environment) is an open protocol for notarizing documents. A document's SHA-256 checksum is written to a public, time-ordered chain, which later proves that the document existed at that time and has not been altered.
 
-NOBLE is an open protocol for notarizing documents: write a file's SHA-256 checksum to a public, time-ordered chain and prove, later, that the document existed and was not altered. This repository holds the **node software** — the daemon that copies the chain, talks to peers, validates incoming transactions and blocks, and (optionally) helps build the next one — together with its command-line tools, its web dashboard and the client libraries the NOBLE apps are built on.
+This repository contains the NOBLE node: the daemon that keeps a copy of the chain, exchanges data with peers, validates transactions and blocks, and can take part in producing new blocks. It also contains the command-line tools, the web dashboard and the client libraries used by the NOBLE apps.
 
-## What a node does
+## Node roles
 
-A NOBLE node connects to other nodes automatically and can take on one or more roles. Each role is opt-in.
+A node connects to other nodes automatically. Every role is opt-in, and a single binary runs all of them. The configuration decides which roles are active.
 
-- **Observer** — copies the chain and answers queries from wallets and other nodes. The cheapest role to run, and the default.
-- **Gateway** — accepts transactions from end-user applications over the wire and broadcasts them into the mempool.
-- **Validator** — assembles new blocks from the mempool and proposes them every cycle.
-- **Voter** — casts votes that decide which proposed block wins for a given cycle. Often also a validator.
+| Role | What it does |
+|---|---|
+| Observer | Keeps a copy of the chain and answers queries from wallets and other nodes. This is the default and the least demanding role. |
+| Gateway | Accepts transactions from end-user applications and relays them to the network. |
+| Validator | Builds blocks from pending transactions and proposes one every cycle. |
+| Voter | Votes on which proposed block wins each cycle. A voter is usually also a validator. |
 
-The same binary runs every role; the configuration decides which are active.
+## Consensus
 
-## Consensus and cadence
+NOBLE uses Proof of Reputation instead of Proof of Work. There is no mining and no specialized hardware. Each node keeps its own list of validators it trusts, and every cycle the network votes on which proposed block wins. Validators that behave honestly gain reputation. Validators that sign false data or fall silent at the wrong time lose it, and the network stops relying on them.
 
-NOBLE uses **Proof of Reputation**, not Proof of Work. Each node keeps its own list of validators it trusts, and every cycle the network votes on which proposed block wins. No mining, no energy race, no specialized hardware. Behave well, reputation grows. Sign something false or go silent at the wrong time, reputation drops, and the rest of the network drifts away.
+Each cycle lasts 16 minutes and is divided into four phases of 4 minutes:
 
-A cycle is **16 minutes**, split into four 4-minute phases:
+| Phase | What happens |
+|---|---|
+| 1. Proposal | Validators build and broadcast candidate blocks. |
+| 2. Voting | First-round votes are cast and collected. |
+| 3. Reflection | Second-round confirmation votes are cast and collected. |
+| 4. Propagation | The winning block reaches every node and is committed at the end of the cycle. |
 
-1. **Proposal** — validators build and broadcast candidate blocks.
-2. **Voting** — first-round votes are cast and collected.
-3. **Reflection** — second-round confirmation votes are cast and collected.
-4. **Propagation** — the winning block spreads and is committed at the cycle boundary.
-
-At most one block is added per cycle. A block is final once **three more blocks** sit on top of it — about **48 minutes** later. Until then, transactions surface as `pending` → `maturing` → `complete`.
+At most one block is added per cycle. A block becomes final when three more blocks have been added on top of it, about 48 minutes later. A transaction is reported as `pending` while it waits to be included, `maturing` once it is in a block, and `complete` once that block is final.
 
 ## Network parameters
 
-| | |
+| Parameter | Value |
 |---|---|
-| Block time | 16 minutes (4 × 4-min phases) |
-| Finality | 3 confirmations (~48 min) |
-| Block size | 8 MB |
-| Transaction size | 8 KB max |
-| Throughput | 6–12 transactions per second, depending on transaction size |
+| Block time | 16 minutes (four phases of 4 minutes) |
+| Finality | 3 confirmations, about 48 minutes |
+| Maximum block size | 8 MB |
+| Maximum transaction size | 8 KB |
+| Throughput | 6 to 12 transactions per second, depending on transaction size |
 | Document fingerprint | SHA-256 |
 | Total supply | 20 800 000 NOBLE |
 | Initial block subsidy | 80 NOBLE |
-| Halving | every 130 000 blocks (~4 years) |
+| Halving | Every 130 000 blocks, about 4 years |
 | Smallest unit | 1 groat = 0.00000001 NOBLE |
 
-## Why run one
+## Why run a node
 
-- **Light hardware.** The chain fits on a regular disk, and the cycle gives every node ample time to participate honestly without burning power.
-- **Permissionless.** Joining is a matter of running the binary and pointing it at a peer. No registration, no whitelist, no gatekeeper.
-- **Sovereign.** A node you run is a copy of the chain that no one else can take offline.
-- **Earn a subsidy.** Validators that win a cycle receive the block subsidy, paid in NOBLE. Transaction fees are shared between the winning validator and the gateways that relayed them.
-- **Bitcoin inspired, ungoverned.** Hard cap, halving schedule, peer-to-peer mesh. No company behind it, no foundation to lobby, no committee with a kill switch.
+- **Modest hardware.** The chain fits on an ordinary disk, and the 16-minute cycle gives every node ample time to take part without wasting energy.
+- **Permissionless.** Run the binary and point it at a peer. There is no registration and no whitelist.
+- **Independent.** Your node holds a full copy of the chain that nobody else can take offline.
+- **Rewards.** The validator whose block wins a cycle receives the block subsidy in NOBLE. Transaction fees are shared between that validator and the gateways that relayed the transactions.
+- **Inspired by Bitcoin, ungoverned.** A hard cap, a halving schedule and a peer-to-peer network. No company behind it, no foundation to lobby and no committee that can shut it down.
 
----
+## Installation
 
-## Install
+The build produces three binaries:
 
-The build produces three binaries: `noble-node` (the daemon), `noble-tool` (wallet, chain and maintenance utilities) and `noble-faucet` (an optional standalone faucet).
+| Binary | Purpose |
+|---|---|
+| `noble-node` | The node daemon. |
+| `noble-tool` | Wallet, chain and maintenance commands. |
+| `noble-faucet` | An optional standalone faucet. |
 
 ### Homebrew (macOS and Linux)
 
@@ -65,14 +71,14 @@ brew install --HEAD jpelayo/noble/noble
 brew services start noble
 ```
 
-Or, from a checkout of this repository, `brew install --HEAD --formula Formula/noble.rb`.
+To install from a local checkout instead, run `brew install --HEAD --formula Formula/noble.rb`.
 
-This installs the binaries, the dashboard, shell completions and a background service (launchd on macOS, systemd on Linux). The dashboard and RPC accept connections from this machine only. To allow a network, pass it at install time:
+Homebrew installs the binaries, the dashboard, shell completions and a background service (launchd on macOS, systemd on Linux). By default the dashboard and the RPC accept connections only from the same machine. To allow a network, add an option at install time:
 
 ```sh
-brew install --HEAD jpelayo/noble/noble --with-192   # 192.168.0.0/16  home LAN
-brew install --HEAD jpelayo/noble/noble --with-10    # 10.0.0.0/8      corporate LAN
-brew install --HEAD jpelayo/noble/noble --with-100   # 100.64.0.0/10   Tailscale
+brew install --HEAD jpelayo/noble/noble --with-192   # 192.168.0.0/16, home LAN
+brew install --HEAD jpelayo/noble/noble --with-10    # 10.0.0.0/8, corporate LAN
+brew install --HEAD jpelayo/noble/noble --with-100   # 100.64.0.0/10, Tailscale
 ```
 
 ### Docker
@@ -82,94 +88,97 @@ cd docker
 docker compose up -d --build
 ```
 
-Optional variables, set inline on the same command:
+Two optional variables can be set on the same command line:
 
-- `NOBLE_ALLOWED_IPS=192.168.0.0/16` — who may reach the dashboard and RPC (default: localhost only).
-- `COMPILE_CORES=2` — cap the CPU cores used while compiling. Unset or `0` uses every core.
+| Variable | Effect |
+|---|---|
+| `NOBLE_ALLOWED_IPS=192.168.0.0/16` | Networks allowed to reach the dashboard and the RPC. Without it, only localhost is allowed. |
+| `COMPILE_CORES=2` | Limits the CPU cores used during compilation. Unset or `0` uses all cores. |
 
-Behind a reverse proxy such as nginx-proxy-manager, copy `docker/docker-compose.override.yml.npm` to `docker/docker-compose.override.yml`: it keeps only the peer-to-peer port public, turns off the node's own TLS and joins the proxy's `proxy` network. Its header lists every change.
+To run behind a reverse proxy such as nginx-proxy-manager, copy `docker/docker-compose.override.yml.npm` to `docker/docker-compose.override.yml`. The override keeps only the peer-to-peer port public, disables the node's own TLS and attaches the container to the external `proxy` network. Its header describes each change.
 
 ### From source
 
-Requires Rust 1.80 or newer, CMake, pkg-config and OpenSSL 3.
+Requirements: Rust 1.80 or newer, CMake, pkg-config and OpenSSL 3.
 
 ```sh
 cargo build --release --bin noble-node --bin noble-tool --bin noble-faucet
 ```
 
-The binaries land in `target/release/`.
+The binaries are written to `target/release/`.
 
-## Configure
+## Configuration
 
-All settings live in one TOML file. [`noble.toml`](noble.toml) at the root of this repository is the reference copy with every default; any key you leave out falls back to the same value. Homebrew installs it at `$(brew --prefix)/etc/noble/noble.toml`.
+All settings are in a single TOML file. The [`noble.toml`](noble.toml) file at the root of this repository lists every setting with its default value, and any setting left out of your own file takes that default. Homebrew installs the configuration at `$(brew --prefix)/etc/noble/noble.toml`.
 
-To set up identity, wallet and optional two-factor authentication interactively:
+To configure the node identity, the wallet and optional two-factor authentication interactively, run:
 
 ```sh
 noble-node setup
 ```
 
-Or open the dashboard on first start, at `https://127.0.0.1:8785`, and follow the setup screens.
+Alternatively, start the node and open the dashboard at `https://127.0.0.1:8785`, which guides you through the same steps.
 
-The settings you are most likely to change:
+The most commonly changed settings:
 
-| Section | Key | Purpose |
+| Section | Setting | Purpose |
 |---|---|---|
-| `[node]` | `role` | `observer` (default) or `validator` |
-| `[network]` | `seeds` | peers to contact first |
-| `[network]` | `advertised_addr` | the address other nodes should dial back; set it behind NAT, VPN or containers |
-| `[api]` | `allowed_ips` | networks allowed to reach the dashboard and RPC |
-| `[identity]` | `node_name`, `wants_to_validate`, `wants_to_vote` | how the node presents itself to peers |
-| `[rewards]` | `reward_address` | where subsidy and fees are paid |
+| `[node]` | `role` | `observer` (default) or `validator`. |
+| `[network]` | `seeds` | Peers to contact at startup. |
+| `[network]` | `advertised_addr` | The address other nodes use to reach this one. Set it when the node runs behind NAT, a VPN or a container. |
+| `[api]` | `allowed_ips` | Networks allowed to reach the dashboard and the RPC. |
+| `[identity]` | `node_name`, `wants_to_validate`, `wants_to_vote` | How the node presents itself to peers. |
+| `[rewards]` | `reward_address` | The address that receives subsidies and fees. |
 
-Anything set under `[identity]` is broadcast to every peer. Use a generic contact address rather than a personal one.
+Everything under `[identity]` is broadcast to all peers, so use a generic contact address rather than a personal one.
 
-## Run
+## Running the node
 
 ```sh
-noble-node run noble.toml        # start (add --daemon to run in the background)
-noble-node status                # height, peers, sync state
-noble-node stop
+noble-node run noble.toml    # start in the foreground; add --daemon to run in the background
+noble-node status            # show height, peers and sync state
+noble-node stop              # stop a running node
 ```
 
-Run `noble-node --help` and `noble-tool --help` for every command, including `peers`, `consensus`, `tls-fingerprint`, `wallet`, `chain-info` and `reset-chain`.
+`noble-node --help` and `noble-tool --help` list all commands, including `peers`, `consensus`, `tls-fingerprint`, `wallet`, `chain-info` and `reset-chain`.
 
 ## Peer discovery
 
-On start the node dials the addresses in `[network] seeds`, then learns further peers from the ones it reaches. You can add a peer at any time from the dashboard's **Network** page or with the `noble_dialPeer` RPC method; a bare IP such as `192.168.5.20` is read as `/ip4/192.168.5.20/tcp/8780`. Peers on a different chain — one with a different genesis — are recognised and kept apart.
+At startup the node connects to the addresses listed in `[network] seeds` and learns about further peers from them. You can add a peer at any time on the dashboard's Network page or with the `noble_dialPeer` RPC method. A bare IP address such as `192.168.5.20` is interpreted as `/ip4/192.168.5.20/tcp/8780`. Peers that belong to a different chain, meaning one with a different genesis block, are detected and kept separate.
 
-## Validator setup
+## Becoming a validator
 
-1. Set `[node] role = "validator"`, plus `wants_to_validate = true` and `wants_to_vote = true` under `[identity]`.
-2. Set `[rewards] reward_address` to an address you control.
-3. Keep the node online through whole cycles. Reputation grows with honest, steady participation and falls with missed or contradictory votes.
+1. In the configuration, set `role = "validator"` under `[node]`, and set `wants_to_validate = true` and `wants_to_vote = true` under `[identity]`.
+2. Set `reward_address` under `[rewards]` to an address you control.
+3. Keep the node online for complete cycles. Reputation increases with steady, honest participation and decreases with missed or contradictory votes.
 
-Every node chooses which validators it trusts (the `noble_addValidator` RPC method, or the dashboard's **Consensus** page), so a new validator gains weight as other operators add it to their lists.
+Each node decides which validators it trusts, using the dashboard's Consensus page or the `noble_addValidator` RPC method. A new validator gains weight as other operators add it to their lists.
 
-## Ports and networking
+## Ports
 
 | Port | Service | Default exposure |
 |---|---|---|
-| 8780 | Peer-to-peer (libp2p) | all interfaces — the only port that must be reachable from the internet |
-| 8783 | JSON-RPC over HTTPS | localhost |
-| 8784 | WebSocket subscriptions over WSS | localhost |
-| 8785 | Dashboard (HTTPS; proxies `/rpc` and `/ws`) | localhost |
-| 8786 | Faucet HTTP | all interfaces; on by default (`[faucet] server_enabled`) |
-| 8787 | Prometheus metrics | off |
+| 8780 | Peer-to-peer (libp2p) | All interfaces. This is the only port that must be reachable from the internet. |
+| 8783 | JSON-RPC over HTTPS | Localhost only. |
+| 8784 | WebSocket subscriptions over WSS | Localhost only. |
+| 8785 | Dashboard over HTTPS, which also serves `/rpc` and `/ws` | Localhost only. |
+| 8786 | Faucet over HTTP | All interfaces. Enabled by default (`[faucet] server_enabled`). |
+| 8787 | Prometheus metrics | Disabled. |
 
-The node serves a self-signed TLS certificate by default. `noble-node tls-fingerprint` prints its SHA-256 fingerprint, so you can check it before trusting it in a browser.
+The node uses a self-signed TLS certificate by default. Run `noble-node tls-fingerprint` to print its SHA-256 fingerprint and compare it with the one your browser shows.
 
-## RPC reference
+## RPC
 
-JSON-RPC 2.0 over HTTPS on port 8783. Method names start with `noble_`, and every request must carry the header `Gatekeeper: noble`.
+The node exposes JSON-RPC 2.0 over HTTPS on port 8783. Method names begin with `noble_`, and every request must include the header `Gatekeeper: noble`.
 
 ```sh
 curl -sk https://127.0.0.1:8783 \
-  -H 'Content-Type: application/json' -H 'Gatekeeper: noble' \
+  -H 'Content-Type: application/json' \
+  -H 'Gatekeeper: noble' \
   -d '{"jsonrpc":"2.0","id":1,"method":"noble_getSyncStatus","params":[]}'
 ```
 
-Common methods:
+Frequently used methods:
 
 | Area | Methods |
 |---|---|
@@ -180,36 +189,36 @@ Common methods:
 | Consensus | `noble_getCycleStatus`, `noble_getValidatorList` |
 | Node | `noble_getNodeInfo` |
 
-Live updates (new blocks, transactions, cycle phases, peer changes) are pushed over WebSocket on port 8784. Browsers reach both through the dashboard on port 8785, which adds the header for them.
+Real-time events (new blocks, new transactions, cycle phases and peer changes) are published over WebSocket on port 8784. Browsers reach both services through the dashboard on port 8785, which adds the required header.
 
 ## Logs and metrics
 
-The node writes a size-capped, rotating log to the path set in `[logging] file_path` (Homebrew: `$(brew --prefix)/var/log/noble-node.log`) and prints the effective path at startup. Set `[metrics] enabled = true` to expose Prometheus metrics on `127.0.0.1:8787`.
+The node writes a rotating, size-limited log to the path set in `[logging] file_path` and prints that path at startup. With Homebrew, the log is at `$(brew --prefix)/var/log/noble-node.log`. To expose Prometheus metrics on `127.0.0.1:8787`, set `enabled = true` under `[metrics]`.
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `noble-core` | blocks, transactions, addresses, chain constants |
-| `noble-codec`, `noble-wire` | the in-house CBOR codec and the frozen wire format |
-| `noble-crypto` | keys, signatures, hashing, file encryption |
-| `noble-storage` | RocksDB storage and pruning |
-| `noble-mempool` | transaction pool and relay policy |
-| `noble-consensus` | cycles, voting, reputation, finality |
-| `noble-network` | libp2p networking, peer management, sync |
-| `noble-api` | JSON-RPC and WebSocket server |
-| `noble-node` | the daemon: configuration, setup, healing |
-| `noble-wallet` | keystore and transaction builder |
-| `noble-tool`, `noble-faucet` | command-line tools and the faucet |
-| `noble-gui` | the dashboard (plain HTML, CSS and JavaScript; no build step) |
-| `noble-client` | client libraries and the official apps |
-| `noble-website` | the project website |
-| `fuzz` | fuzzing targets |
-| `docker`, `Formula` | container and Homebrew packaging |
+| `noble-core` | Blocks, transactions, addresses and chain constants. |
+| `noble-codec`, `noble-wire` | The CBOR codec and the frozen wire format. |
+| `noble-crypto` | Keys, signatures, hashing and file encryption. |
+| `noble-storage` | RocksDB storage and pruning. |
+| `noble-mempool` | Transaction pool and relay policy. |
+| `noble-consensus` | Cycles, voting, reputation and finality. |
+| `noble-network` | libp2p networking, peer management and synchronization. |
+| `noble-api` | JSON-RPC and WebSocket server. |
+| `noble-node` | The node daemon: configuration, setup and chain recovery. |
+| `noble-wallet` | Keystore and transaction builder. |
+| `noble-tool`, `noble-faucet` | Command-line tools and the faucet. |
+| `noble-gui` | The dashboard, written in plain HTML, CSS and JavaScript with no build step. |
+| `noble-client` | Client libraries and the official apps. |
+| `noble-website` | The project website. |
+| `fuzz` | Fuzzing targets. |
+| `docker`, `Formula` | Docker and Homebrew packaging. |
 
 ## Contributing
 
-Run the test suite before sending changes:
+Run the full test suite before submitting changes:
 
 ```sh
 cargo test --workspace
@@ -217,4 +226,4 @@ cargo test --workspace
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
